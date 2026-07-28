@@ -1,19 +1,25 @@
-FROM mcr.microsoft.com/playwright/python:v1.44.0-jammy
+# Use official Python lightweight base image
+FROM python:3.10-slim
 
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
-
+# Set working directory inside container
 WORKDIR /app
 
-# Copy and install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Prevent Python from writing pyc files and buffer outputs
+ENV PYTHONUNBUFFERED=1
 
-# Copy application source code
+# Copy requirements file first to utilize Docker layer caching
+COPY requirements.txt .
+
+# Install Python packages and Playwright Chromium with browser dependencies
+RUN pip install --no-cache-dir -r requirements.txt && \
+    playwright install chromium && \
+    playwright install-deps chromium
+
+# Copy rest of application code
 COPY . .
 
-# Expose FastAPI port
+# Expose FastAPI default port
 EXPOSE 8000
 
-# Start Uvicorn production server
+# Start Uvicorn app server
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
