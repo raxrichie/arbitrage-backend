@@ -1,4 +1,3 @@
-# Use official Playwright Python image (Chromium & Python pre-installed)
 FROM mcr.microsoft.com/playwright/python:v1.44.0-jammy
 
 ENV PYTHONDONTWRITEBYTECODE 1
