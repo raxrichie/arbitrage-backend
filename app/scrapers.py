@@ -7,16 +7,18 @@ from playwright.async_api import async_playwright
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("scrapers")
 
+# Clean Browser Headers (Let HTTPX handle gzip/deflate decompression automatically)
 REAL_BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
+    "sec-ch-ua": '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
 }
 
 
 def safe_float(val: Any, default: float = 1.0) -> float:
-    """Safely parses raw odds to float values (> 1.01)."""
     try:
         if val is None:
             return default
@@ -37,9 +39,7 @@ async def fetch_api(client: httpx.AsyncClient, url: str, bookmaker: str, extra_h
                 logger.info(f"[{bookmaker.upper()}] Successfully fetched {len(matches)} events.")
                 return matches
             except Exception as e:
-                # INSPECT RAW TEXT TO SEE WHAT CAME BACK
-                snippet = response.text[:150].replace("\n", "")
-                logger.warning(f"[{bookmaker}] Non-JSON response (Error: {e}). Raw snippet: {snippet}")
+                logger.warning(f"[{bookmaker}] JSON Decode Error: {e}")
         else:
             logger.warning(f"[{bookmaker}] HTTP Status {response.status_code}")
     except Exception as e:
@@ -48,7 +48,7 @@ async def fetch_api(client: httpx.AsyncClient, url: str, bookmaker: str, extra_h
 
 
 async def fetch_with_playwright(url: str, bookmaker: str) -> List[Dict[str, Any]]:
-    """Playwright worker fallback for strict WAF protection."""
+    """Playwright worker using Microsoft Docker base image."""
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
@@ -60,7 +60,9 @@ async def fetch_with_playwright(url: str, bookmaker: str) -> List[Dict[str, Any]
                 try:
                     data = await response.json()
                     await browser.close()
-                    return parse_raw_data(bookmaker, data)
+                    matches = parse_raw_data(bookmaker, data)
+                    logger.info(f"[{bookmaker.upper()}-PLAYWRIGHT] Successfully fetched {len(matches)} events.")
+                    return matches
                 except Exception:
                     pass
             await browser.close()
@@ -70,161 +72,84 @@ async def fetch_with_playwright(url: str, bookmaker: str) -> List[Dict[str, Any]
 
 
 # -------------------------------------------------------------------
-# SITE-SPECIFIC PARSER ENGINE
+# PARSER ENGINE (SAFE FOR LISTS & DICTS)
 # -------------------------------------------------------------------
 
 def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
     matches = []
     try:
-        # --- 1. BetPawa (Microservice Format) ---
-        if bookmaker == "betpawa":
-            events = data.get("events", []) if isinstance(data, dict) else []
-            for item in events:
-                name = item.get("name", "")
-                parts = name.split(" vs ") if " vs " in name else name.split(" - ")
-                home = parts[0].strip() if len(parts) == 2 else "Home"
-                away = parts[1].strip() if len(parts) == 2 else "Away"
-
-                o1, oX, o2 = 1.0, 1.0, 1.0
-                for market in item.get("markets", []):
-                    if market.get("name") in ["1X2", "3-Way"]:
-                        for outcome in market.get("outcomes", []):
-                            oname = outcome.get("name")
-                            if oname == "1": o1 = safe_float(outcome.get("odds"))
-                            elif oname == "X": oX = safe_float(outcome.get("odds"))
-                            elif oname == "2": o2 = safe_float(outcome.get("odds"))
-
-                matches.append({
-                    "bookmaker": bookmaker,
-                    "id": str(item.get("id") or ""),
-                    "homeTeam": home,
-                    "awayTeam": away,
-                    "league": "Soccer",
-                    "startTime": str(item.get("startTime") or ""),
-                    "odds": {"1": o1, "X": oX, "2": o2}
-                })
-            return matches
-
-        # --- 2. Mostbet (Coefficients Object Format) ---
-        if bookmaker == "mostbet":
-            events = data.get("events", []) if isinstance(data, dict) else []
-            for item in events:
-                coeffs = item.get("coefficients", {})
-                matches.append({
-                    "bookmaker": bookmaker,
-                    "id": str(item.get("id") or ""),
-                    "homeTeam": str(item.get("home") or item.get("homeTeam") or "Home"),
-                    "awayTeam": str(item.get("away") or item.get("awayTeam") or "Away"),
-                    "league": "Soccer",
-                    "startTime": str(item.get("startTime") or ""),
-                    "odds": {
-                        "1": safe_float(coeffs.get("1")),
-                        "X": safe_float(coeffs.get("X")),
-                        "2": safe_float(coeffs.get("2"))
-                    }
-                })
-            return matches
-
-        # --- 3. 1Win (Data Array + Outcomes Rates Schema) ---
-        if bookmaker == "1win":
-            events = data.get("data", []) if isinstance(data, dict) else []
-            for item in events:
-                o1, oX, o2 = 1.0, 1.0, 1.0
-                for outcome in item.get("outcomes", []):
-                    t = str(outcome.get("type"))
-                    if t == "1": o1 = safe_float(outcome.get("rate"))
-                    elif t in ["X", "2"]: oX = safe_float(outcome.get("rate")) if t == "X" else oX
-                    if t == "2": o2 = safe_float(outcome.get("rate"))
-
-                matches.append({
-                    "bookmaker": bookmaker,
-                    "id": str(item.get("id") or ""),
-                    "homeTeam": str(item.get("team1") or "Home"),
-                    "awayTeam": str(item.get("team2") or "Away"),
-                    "league": "Soccer",
-                    "startTime": str(item.get("startTime") or ""),
-                    "odds": {"1": o1, "X": oX, "2": o2}
-                })
-            return matches
-
-        # --- 4. 888bet (Nested Odds Map Format) ---
-        if bookmaker == "888bet":
-            events = data.get("events", []) if isinstance(data, dict) else []
-            for item in events:
-                name = item.get("name", "")
-                parts = name.split(" vs ") if " vs " in name else name.split(" - ")
-                home = parts[0].strip() if len(parts) == 2 else "Home"
-                away = parts[1].strip() if len(parts) == 2 else "Away"
-
-                raw_odds = item.get("odds", {})
-                matches.append({
-                    "bookmaker": bookmaker,
-                    "id": str(item.get("eventId") or item.get("id") or ""),
-                    "homeTeam": home,
-                    "awayTeam": away,
-                    "league": "Soccer",
-                    "startTime": str(item.get("startTime") or ""),
-                    "odds": {
-                        "1": safe_float(raw_odds.get("home")),
-                        "X": safe_float(raw_odds.get("draw")),
-                        "2": safe_float(raw_odds.get("away"))
-                    }
-                })
-            return matches
-
-        # --- 5. 1xBet / 22Bet / Helabet Schema ---
-        if bookmaker in ["1xbet", "22bet", "helabet"]:
-            events = data.get("Value", []) if isinstance(data, dict) else []
-            for item in events:
+        # Handle Top-Level List Payload (Betika, SportPesa, etc.)
+        if isinstance(data, list):
+            for item in data:
                 if isinstance(item, dict):
-                    home = item.get("O1") or item.get("HT")
-                    away = item.get("O2") or item.get("AT")
-                    o1, oX, o2 = 1.0, 1.0, 1.0
-                    for outcome in item.get("E", []):
-                        t = outcome.get("T")
-                        if t == 1: o1 = safe_float(outcome.get("C"))
-                        elif t == 2: oX = safe_float(outcome.get("C"))
-                        elif t == 3: o2 = safe_float(outcome.get("C"))
+                    home = item.get("homeTeam") or item.get("home_team") or item.get("homeName") or item.get("home") or item.get("team1")
+                    away = item.get("awayTeam") or item.get("away_team") or item.get("awayName") or item.get("away") or item.get("team2")
+                    raw_odds = item.get("odds") or {}
+                    o1 = safe_float(item.get("odds1") or item.get("homeOdds") or raw_odds.get("1"))
+                    oX = safe_float(item.get("oddsX") or item.get("drawOdds") or raw_odds.get("X"))
+                    o2 = safe_float(item.get("odds2") or item.get("awayOdds") or raw_odds.get("2"))
 
                     if home and away:
                         matches.append({
                             "bookmaker": bookmaker,
-                            "id": str(item.get("I") or ""),
+                            "id": str(item.get("id") or item.get("eventId") or ""),
                             "homeTeam": str(home),
                             "awayTeam": str(away),
-                            "league": str(item.get("LE") or "Soccer"),
-                            "startTime": str(item.get("S") or ""),
+                            "league": str(item.get("league") or "Soccer"),
+                            "startTime": str(item.get("startTime") or ""),
                             "odds": {"1": o1, "X": oX, "2": o2}
                         })
             return matches
 
-        # --- 6. Generic Default Schema (Betika, SportyBet, PremierBet, KingBet, etc.) ---
-        events = []
-        if isinstance(data, list):
-            events = data
-        elif isinstance(data, dict):
+        # Handle Dictionary Payloads
+        if isinstance(data, dict):
+            # 1xBet / 22Bet / Helabet Schema
+            if bookmaker in ["1xbet", "22bet", "helabet"]:
+                events = data.get("Value", [])
+                for item in events:
+                    if isinstance(item, dict):
+                        home = item.get("O1") or item.get("HT")
+                        away = item.get("O2") or item.get("AT")
+                        o1, oX, o2 = 1.0, 1.0, 1.0
+                        for outcome in item.get("E", []):
+                            t = outcome.get("T")
+                            if t == 1: o1 = safe_float(outcome.get("C"))
+                            elif t == 2: oX = safe_float(outcome.get("C"))
+                            elif t == 3: o2 = safe_float(outcome.get("C"))
+
+                        if home and away:
+                            matches.append({
+                                "bookmaker": bookmaker,
+                                "id": str(item.get("I") or ""),
+                                "homeTeam": str(home),
+                                "awayTeam": str(away),
+                                "league": str(item.get("LE") or "Soccer"),
+                                "startTime": str(item.get("S") or ""),
+                                "odds": {"1": o1, "X": oX, "2": o2}
+                            })
+                return matches
+
+            # Generic dictionary key search
             events = data.get("data") or data.get("events") or data.get("matches") or data.get("items") or data.get("elements") or [data]
+            for item in events:
+                if isinstance(item, dict):
+                    home = item.get("homeTeam") or item.get("home_team") or item.get("homeName") or item.get("home") or item.get("team1")
+                    away = item.get("awayTeam") or item.get("away_team") or item.get("awayName") or item.get("away") or item.get("team2")
+                    raw_odds = item.get("odds") or {}
+                    o1 = safe_float(item.get("odds1") or item.get("homeOdds") or raw_odds.get("1"))
+                    oX = safe_float(item.get("oddsX") or item.get("drawOdds") or raw_odds.get("X"))
+                    o2 = safe_float(item.get("odds2") or item.get("awayOdds") or raw_odds.get("2"))
 
-        for item in events:
-            if isinstance(item, dict):
-                home = item.get("homeTeam") or item.get("home_team") or item.get("homeName") or item.get("team1")
-                away = item.get("awayTeam") or item.get("away_team") or item.get("awayName") or item.get("team2")
-                
-                raw_odds = item.get("odds") or {}
-                o1 = safe_float(item.get("odds1") or item.get("homeOdds") or raw_odds.get("1"))
-                oX = safe_float(item.get("oddsX") or item.get("drawOdds") or raw_odds.get("X"))
-                o2 = safe_float(item.get("odds2") or item.get("awayOdds") or raw_odds.get("2"))
-
-                if home and away:
-                    matches.append({
-                        "bookmaker": bookmaker,
-                        "id": str(item.get("id") or item.get("eventId") or item.get("gameId") or ""),
-                        "homeTeam": str(home),
-                        "awayTeam": str(away),
-                        "league": str(item.get("league") or item.get("categoryName") or "Soccer"),
-                        "startTime": str(item.get("startTime") or item.get("eventDate") or ""),
-                        "odds": {"1": o1, "X": oX, "2": o2}
-                    })
+                    if home and away:
+                        matches.append({
+                            "bookmaker": bookmaker,
+                            "id": str(item.get("id") or item.get("eventId") or ""),
+                            "homeTeam": str(home),
+                            "awayTeam": str(away),
+                            "league": str(item.get("league") or "Soccer"),
+                            "startTime": str(item.get("startTime") or ""),
+                            "odds": {"1": o1, "X": oX, "2": o2}
+                        })
 
     except Exception as e:
         logger.error(f"[{bookmaker}] Parser Exception: {e}")
@@ -233,58 +158,11 @@ def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
 
 
 # -------------------------------------------------------------------
-# INDIVIDUAL SCRAPER ROUTINES (ALL 21 SPORTSBOOKS)
+# INDIVIDUAL SCRAPERS
 # -------------------------------------------------------------------
 
-async def get_betpawa(client: httpx.AsyncClient):
-    url = "https://pawa-offering-service.betpawa.co.tz/offering/v1/events?sportId=1&limit=100"
-    res = await fetch_api(client, url, "betpawa")
-    if not res:
-        res = await fetch_api(client, "https://www.betpawa.co.tz/api/offering/v1/events", "betpawa")
-    return res if len(res) > 0 else await fetch_with_playwright("https://www.betpawa.co.tz", "betpawa")
-
-async def get_mostbet(client: httpx.AsyncClient):
-    url = "https://mostbet.com/api/v1/line?sportId=1"
-    res = await fetch_api(client, url, "mostbet")
-    return res if len(res) > 0 else await fetch_with_playwright("https://mostbet.co.tz/line/football", "mostbet")
-
-async def get_1win(client: httpx.AsyncClient):
-    url = "https://1win.pro/api/v1/sports/1/events?limit=100"
-    res = await fetch_api(client, url, "1win")
-    return res if len(res) > 0 else await fetch_with_playwright("https://1win.pro", "1win")
-
-async def get_888bet(client: httpx.AsyncClient):
-    url = "https://sports-api.888bet.co.tz/v1/sports/1/events"
-    extra_headers = {"Origin": "https://888bet.co.tz"}
-    res = await fetch_api(client, url, "888bet", extra_headers=extra_headers)
-    if not res:
-        res = await fetch_api(client, "https://sb2frontend-api.888bet.co.tz/api/Sports/GetEvents?sportId=1", "888bet")
-    return res if len(res) > 0 else await fetch_with_playwright("https://888bet.tz", "888bet")
-
-async def get_kingbet(client: httpx.AsyncClient):
-    url = "https://kingbet.co.tz/api/v1/sports/events?sport=football"
-    res = await fetch_api(client, url, "kingbet")
-    return res if len(res) > 0 else await fetch_with_playwright("https://kingbet.co.tz", "kingbet")
-
 async def get_betika(client: httpx.AsyncClient):
-    url = "https://api.betika.com/v1/uo/matches?limit=100&sub_type=prematch"
-    res = await fetch_api(client, url, "betika")
-    return res if len(res) > 0 else await fetch_with_playwright("https://www.betika.com/en-tz/", "betika")
-
-async def get_sportybet(client: httpx.AsyncClient):
-    url = "https://www.sportybet.com/api/tz/factsCenter/pcUpcomingEvents?sportId=sr%3Asport%3A1&marketId=1%2C18%2C10%2C29%2C11%2C26%2C36%2C14%2C60100&pageSize=100&pageNum=1&option=1"
-    res = await fetch_api(client, url, "sportybet")
-    return res if len(res) > 0 else await fetch_with_playwright("https://www.sportybet.com/tz/", "sportybet")
-
-async def get_sportpesa(client: httpx.AsyncClient):
-    url = "https://www.sportpesa.co.tz/api/games/highlights?sportId=1"
-    res = await fetch_api(client, url, "sportpesa")
-    return res if len(res) > 0 else await fetch_with_playwright("https://www.sportpesa.co.tz/", "sportpesa")
-
-async def get_premierbet(client: httpx.AsyncClient):
-    url = "https://sports-api.premierbet.co.tz/v1/events/highlights?country=TZ&group=g2&platform=desktop&locale=sw&sportId=1&limit=10"
-    res = await fetch_api(client, url, "premierbet")
-    return res if len(res) > 0 else await fetch_with_playwright("https://www.premierbet.co.tz/", "premierbet")
+    return await fetch_api(client, "https://api.betika.com/v1/uo/matches?limit=100&sub_type=prematch", "betika")
 
 async def get_1xbet(client: httpx.AsyncClient):
     url = "https://1xbet.tz/service-api/main-line-feed/v1/expressDay?cfView=3&country=181&gr=1499&lng=en&ref=398"
@@ -301,50 +179,67 @@ async def get_helabet(client: httpx.AsyncClient):
     res = await fetch_api(client, url, "helabet")
     return res if len(res) > 0 else await fetch_with_playwright(url, "helabet")
 
-async def get_meridianbet(client: httpx.AsyncClient):
-    url = "https://meridianbet.co.tz/api/v1/events/highlights"
-    res = await fetch_api(client, url, "meridianbet")
-    return res if len(res) > 0 else await fetch_with_playwright("https://meridianbet.co.tz", "meridianbet")
-
-async def get_parimatch(client: httpx.AsyncClient):
-    url = "https://parimatch.co.tz/api/v1/sports/1/prematch"
-    res = await fetch_api(client, url, "parimatch")
-    return res if len(res) > 0 else await fetch_with_playwright("https://parimatch.co.tz", "parimatch")
-
-async def get_betway(client: httpx.AsyncClient):
-    url = "https://www.betway.co.tz/sportsapi/br/v1/BetBook/Highlights/?countryCode=TZ&sportId=soccer&Skip=0&Take=20&cultureCode=sw-TZ&isEsport=false&boostedOnly=false&marketTypes=[Win/Draw/Win]"
-    res = await fetch_api(client, url, "betway")
-    return res if len(res) > 0 else await fetch_with_playwright("https://www.betway.co.tz", "betway")
-
 async def get_sokabet(client: httpx.AsyncClient):
     url = "https://sb2frontend-altenar2.biahosted.com/api/Sportsbook/GetTopEvents?culture=en-GB&integration=sokabet"
     res = await fetch_api(client, url, "sokabet")
     return res if len(res) > 0 else await fetch_with_playwright("https://sokabet.co.tz", "sokabet")
 
-async def get_gsb(client: httpx.AsyncClient):
-    url = "https://gsb.co.tz/services/evapi/event/GetSportsTree?statusId=0&eventTypeId=0"
-    res = await fetch_api(client, url, "gsb")
-    return res if len(res) > 0 else await fetch_with_playwright("https://gsb.co.tz", "gsb")
+async def get_meridianbet(client: httpx.AsyncClient):
+    url = "https://meridianbet.co.tz/api/v1/events/highlights"
+    res = await fetch_api(client, url, "meridianbet")
+    return res if len(res) > 0 else await fetch_with_playwright("https://meridianbet.co.tz", "meridianbet")
 
 async def get_wasafibet(client: httpx.AsyncClient):
     url = "https://api.wasafibet.com/wb/sportsbook?sport_id=soccer&src=1&producer=3&type=matches&platform=desktop"
     res = await fetch_api(client, url, "wasafibet")
     return res if len(res) > 0 else await fetch_with_playwright("https://wasafibet.com", "wasafibet")
 
+async def get_gsb(client: httpx.AsyncClient):
+    url = "https://gsb.co.tz/services/evapi/event/GetSportsTree?statusId=0&eventTypeId=0"
+    res = await fetch_api(client, url, "gsb")
+    return res if len(res) > 0 else await fetch_with_playwright("https://gsb.co.tz", "gsb")
+
+async def get_kingbet(client: httpx.AsyncClient):
+    url = "https://kingbet.co.tz/api/v1/sports/events?sport=football"
+    res = await fetch_api(client, url, "kingbet")
+    return res if len(res) > 0 else await fetch_with_playwright("https://kingbet.co.tz", "kingbet")
+
+async def get_betpawa(client: httpx.AsyncClient):
+    return await fetch_with_playwright("https://www.betpawa.co.tz", "betpawa")
+
+async def get_888bet(client: httpx.AsyncClient):
+    return await fetch_with_playwright("https://888bet.tz", "888bet")
+
+async def get_sportybet(client: httpx.AsyncClient):
+    return await fetch_api(client, "https://www.sportybet.com/api/tz/factsCenter/pcUpcomingEvents?sportId=sr%3Asport%3A1&marketId=1%2C18%2C10%2C29%2C11%2C26%2C36%2C14%2C60100&pageSize=100&pageNum=1&option=1", "sportybet")
+
+async def get_sportpesa(client: httpx.AsyncClient):
+    return await fetch_api(client, "https://www.sportpesa.co.tz/api/games/highlights?sportId=1", "sportpesa")
+
+async def get_premierbet(client: httpx.AsyncClient):
+    return await fetch_api(client, "https://sports-api.premierbet.co.tz/v1/events/highlights?country=TZ&group=g2&platform=desktop&locale=sw&sportId=1&limit=10", "premierbet")
+
+async def get_parimatch(client: httpx.AsyncClient):
+    return await fetch_with_playwright("https://parimatch.co.tz", "parimatch")
+
+async def get_betway(client: httpx.AsyncClient):
+    return await fetch_api(client, "https://www.betway.co.tz/sportsapi/br/v1/BetBook/Highlights/?countryCode=TZ&sportId=soccer&Skip=0&Take=20&cultureCode=sw-TZ&isEsport=false&boostedOnly=false&marketTypes=[Win/Draw/Win]", "betway")
+
 async def get_bangbet(client: httpx.AsyncClient):
-    url = "https://bet-api.bangbet.com/api/bet/match/listTop?country=tz"
-    res = await fetch_api(client, url, "bangbet")
-    return res if len(res) > 0 else await fetch_with_playwright("https://www.bangbet.com/tz/", "bangbet")
+    return await fetch_api(client, "https://bet-api.bangbet.com/api/bet/match/listTop?country=tz", "bangbet")
 
 async def get_leonbet(client: httpx.AsyncClient):
-    url = "https://leonbet.co.tz/api-2/betline/events/all?ctag=en-US"
-    res = await fetch_api(client, url, "leonbet")
-    return res if len(res) > 0 else await fetch_with_playwright("https://leonbet.co.tz", "leonbet")
+    return await fetch_api(client, "https://leonbet.co.tz/api-2/betline/events/all?ctag=en-US", "leonbet")
 
 async def get_thronebet(client: httpx.AsyncClient):
-    url = "https://api.thronebet.com/api/v2/multi"
-    res = await fetch_api(client, url, "thronebet")
-    return res if len(res) > 0 else await fetch_with_playwright("https://thronebet.com", "thronebet")
+    return await fetch_api(client, "https://api.thronebet.com/api/v2/multi", "thronebet")
+
+async def get_mostbet(client: httpx.AsyncClient):
+    return await fetch_with_playwright("https://mostbet.co.tz", "mostbet")
+
+async def get_1win(client: httpx.AsyncClient):
+    return await fetch_with_playwright("https://1win.pro", "1win")
+
 
 BOOKMAKER_MAP = {
     "betika": get_betika,
