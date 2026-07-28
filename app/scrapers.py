@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import json
+import traceback
 import httpx
 from typing import Dict, List, Any, Optional
 from playwright.async_api import async_playwright
@@ -16,6 +18,9 @@ REAL_BROWSER_HEADERS = {
     "sec-ch-ua-platform": '"Windows"',
 }
 
+# Robust Timeout Config for Slow / Remote Sportsbook Endpoints
+CUSTOM_TIMEOUT = httpx.Timeout(connect=20.0, read=30.0, write=20.0, pool=20.0)
+
 
 def safe_float(val: Any, default: float = 1.0) -> float:
     try:
@@ -30,19 +35,31 @@ def safe_float(val: Any, default: float = 1.0) -> float:
 async def fetch_api(client: httpx.AsyncClient, url: str, bookmaker: str, extra_headers: Optional[dict] = None) -> List[Dict[str, Any]]:
     headers = {**REAL_BROWSER_HEADERS, **(extra_headers or {})}
     try:
-        response = await client.get(url, headers=headers, timeout=12.0)
+        response = await client.get(url, headers=headers, timeout=CUSTOM_TIMEOUT)
         if response.status_code == 200:
             try:
                 data = response.json()
                 matches = parse_raw_data(bookmaker, data)
-                logger.info(f"[{bookmaker.upper()}] Successfully fetched {len(matches)} events.")
+                
+                # --- DIAGNOSTIC LOGGING ---
+                if len(matches) == 0:
+                    if isinstance(data, dict):
+                        logger.info(f"[{bookmaker.upper()}] HTTP 200 OK but 0 matches parsed. Top-level Dict Keys: {list(data.keys())[:15]}")
+                    elif isinstance(data, list):
+                        sample_type = type(data[0]).__name__ if data else "empty_list"
+                        logger.info(f"[{bookmaker.upper()}] HTTP 200 OK but 0 matches parsed. Top-level Payload is List (len={len(data)}, sample_item_type={sample_type})")
+                else:
+                    logger.info(f"[{bookmaker.upper()}] Successfully parsed {len(matches)} matches. Sample match: {matches[0]['homeTeam']} vs {matches[0]['awayTeam']}")
+                
                 return matches
-            except Exception as e:
-                logger.warning(f"[{bookmaker}] JSON Decode/Parse Error: {e}")
+
+            except Exception as parse_err:
+                logger.error(f"[{bookmaker}] JSON Decode/Parser Exception: {repr(parse_err)}")
         else:
             logger.warning(f"[{bookmaker}] HTTP Status {response.status_code}")
     except Exception as e:
-        logger.error(f"[{bookmaker}] HTTPX Fetch Error: {e}")
+        # --- EXPLICIT EXCEPTION LOGGING ---
+        logger.error(f"[{bookmaker}] Fetch Error ({type(e).__name__}): {repr(e)}")
     return []
 
 
@@ -54,19 +71,19 @@ async def fetch_with_playwright(url: str, bookmaker: str) -> List[Dict[str, Any]
             context = await browser.new_context(user_agent=REAL_BROWSER_HEADERS["User-Agent"])
             page = await context.new_page()
             
-            response = await page.goto(url, wait_until="networkidle", timeout=15000)
+            response = await page.goto(url, wait_until="networkidle", timeout=20000)
             if response and response.status == 200:
                 try:
                     data = await response.json()
                     await browser.close()
                     matches = parse_raw_data(bookmaker, data)
-                    logger.info(f"[{bookmaker.upper()}-PLAYWRIGHT] Successfully fetched {len(matches)} events.")
+                    logger.info(f"[{bookmaker.upper()}-PLAYWRIGHT] Successfully parsed {len(matches)} matches.")
                     return matches
-                except Exception:
-                    pass
+                except Exception as parse_err:
+                    logger.error(f"[{bookmaker}-PLAYWRIGHT] JSON Parse Error: {repr(parse_err)}")
             await browser.close()
     except Exception as e:
-        logger.error(f"[{bookmaker}] Playwright Worker Error: {e}")
+        logger.error(f"[{bookmaker}] Playwright Error ({type(e).__name__}): {repr(e)}")
     return []
 
 
@@ -77,16 +94,15 @@ async def fetch_with_playwright(url: str, bookmaker: str) -> List[Dict[str, Any]
 def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
     matches = []
     try:
-        # --- 1. Betika (List of Matches or Markets) ---
+        # --- 1. Betika (List of Matches or Dict wrapper) ---
         if bookmaker == "betika":
-            events = data if isinstance(data, list) else data.get("data", [])
+            events = data if isinstance(data, list) else (data.get("data") or data.get("matches") or [])
             for item in events:
                 if isinstance(item, dict):
-                    home = item.get("home_name") or item.get("homeTeam") or item.get("home")
-                    away = item.get("away_name") or item.get("awayTeam") or item.get("away")
+                    home = item.get("home_name") or item.get("homeTeam") or item.get("home") or item.get("team1")
+                    away = item.get("away_name") or item.get("awayTeam") or item.get("away") or item.get("team2")
                     
                     o1, oX, o2 = 1.0, 1.0, 1.0
-                    # Handle rawodds or market list
                     raw_odds = item.get("home_odds") or item.get("odds")
                     if isinstance(raw_odds, dict):
                         o1 = safe_float(raw_odds.get("1") or item.get("home_odds"))
@@ -94,12 +110,13 @@ def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
                         o2 = safe_float(raw_odds.get("2") or item.get("away_odds"))
                     elif isinstance(raw_odds, list):
                         for market in raw_odds:
-                            for outcome in market.get("odds", []):
-                                display = outcome.get("display") or outcome.get("name")
-                                val = outcome.get("odd_value") or outcome.get("odd")
-                                if display == "1": o1 = safe_float(val)
-                                elif display == "X": oX = safe_float(val)
-                                elif display == "2": o2 = safe_float(val)
+                            if isinstance(market, dict):
+                                for outcome in market.get("odds", []):
+                                    display = outcome.get("display") or outcome.get("name")
+                                    val = outcome.get("odd_value") or outcome.get("odd")
+                                    if display == "1": o1 = safe_float(val)
+                                    elif display == "X": oX = safe_float(val)
+                                    elif display == "2": o2 = safe_float(val)
 
                     if home and away:
                         matches.append({
@@ -107,15 +124,15 @@ def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
                             "id": str(item.get("id") or item.get("match_id") or ""),
                             "homeTeam": str(home),
                             "awayTeam": str(away),
-                            "league": str(item.get("competition_name") or "Soccer"),
+                            "league": str(item.get("competition_name") or item.get("league") or "Soccer"),
                             "startTime": str(item.get("start_time") or ""),
                             "odds": {"1": o1, "X": oX, "2": o2}
                         })
             return matches
 
-        # --- 2. SportyBet (Tournaments -> Events) ---
+        # --- 2. SportyBet (tournaments -> events) ---
         if bookmaker == "sportybet":
-            tournaments = data.get("data", {}).get("tournaments", [])
+            tournaments = data.get("data", {}).get("tournaments", []) if isinstance(data, dict) else []
             for tourney in tournaments:
                 for item in tourney.get("events", []):
                     home = item.get("homeTeamName")
@@ -143,7 +160,7 @@ def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
 
         # --- 3. BangBet (groupList -> matchVoList) ---
         if bookmaker == "bangbet":
-            groups = data.get("data", {}).get("groupList", [])
+            groups = data.get("data", {}).get("groupList", []) if isinstance(data, dict) else []
             for group in groups:
                 for match_vo in group.get("matchVoList", []):
                     home = match_vo.get("homeTeamName")
@@ -171,32 +188,34 @@ def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
 
         # --- 4. Sokabet (Result.Events or SportsTree) ---
         if bookmaker == "sokabet":
-            res_events = data.get("Result", {}).get("Events", []) or data.get("Events", [])
-            if res_events:
-                for event in res_events:
-                    home = event.get("HomeTeam") or event.get("homeTeam")
-                    away = event.get("AwayTeam") or event.get("awayTeam")
-                    o1, oX, o2 = 1.0, 1.0, 1.0
-                    for market in event.get("Markets", []):
-                        for option in market.get("Options", []):
-                            name = str(option.get("Name") or option.get("type"))
-                            if name == "1": o1 = safe_float(option.get("Price"))
-                            elif name in ["X", "Draw"]: oX = safe_float(option.get("Price"))
-                            elif name == "2": o2 = safe_float(option.get("Price"))
+            res_events = data.get("Result", {}).get("Events", []) if isinstance(data, dict) else []
+            if not res_events and isinstance(data, dict):
+                res_events = data.get("Events", [])
+                
+            for event in res_events:
+                home = event.get("HomeTeam") or event.get("homeTeam")
+                away = event.get("AwayTeam") or event.get("awayTeam")
+                o1, oX, o2 = 1.0, 1.0, 1.0
+                for market in event.get("Markets", []):
+                    for option in market.get("Options", []):
+                        name = str(option.get("Name") or option.get("type"))
+                        if name == "1": o1 = safe_float(option.get("Price"))
+                        elif name in ["X", "Draw"]: oX = safe_float(option.get("Price"))
+                        elif name == "2": o2 = safe_float(option.get("Price"))
 
-                    if home and away:
-                        matches.append({
-                            "bookmaker": bookmaker,
-                            "id": str(event.get("EventId") or ""),
-                            "homeTeam": str(home),
-                            "awayTeam": str(away),
-                            "league": "Soccer",
-                            "startTime": str(event.get("EventDate") or ""),
-                            "odds": {"1": o1, "X": oX, "2": o2}
-                        })
-                return matches
+                if home and away:
+                    matches.append({
+                        "bookmaker": bookmaker,
+                        "id": str(event.get("EventId") or ""),
+                        "homeTeam": str(home),
+                        "awayTeam": str(away),
+                        "league": "Soccer",
+                        "startTime": str(event.get("EventDate") or ""),
+                        "odds": {"1": o1, "X": oX, "2": o2}
+                    })
+            return matches
 
-        # --- 5. Generic Default Fallback ---
+        # --- 5. Generic Fallback Engine ---
         events = []
         if isinstance(data, list):
             events = data
@@ -224,9 +243,10 @@ def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
                     })
 
     except Exception as e:
-        logger.error(f"[{bookmaker}] Parser Exception: {e}")
+        logger.error(f"[{bookmaker}] Parser Exception: {repr(e)}")
 
     return matches
+
 
 # -------------------------------------------------------------------
 # INDIVIDUAL SITE ROUTINES
@@ -328,8 +348,8 @@ BOOKMAKER_MAP = {
 
 
 async def scrape_all_sportsbooks() -> List[Dict[str, Any]]:
-    # Enable follow_redirects=True for the global HTTP client
-    async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
+    # Enable follow_redirects=True globally
+    async with httpx.AsyncClient(timeout=CUSTOM_TIMEOUT, follow_redirects=True) as client:
         tasks = [func(client) for func in BOOKMAKER_MAP.values()]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
