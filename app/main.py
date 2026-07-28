@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from fastapi import FastAPI, APIRouter, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
