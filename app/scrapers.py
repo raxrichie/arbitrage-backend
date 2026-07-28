@@ -34,16 +34,18 @@ async def fetch_api(client: httpx.AsyncClient, url: str, bookmaker: str, extra_h
             try:
                 data = response.json()
                 matches = parse_raw_data(bookmaker, data)
-                # LOG THE EXACT COUNT (N) FETCHED FOR THIS SITE
                 logger.info(f"[{bookmaker.upper()}] Successfully fetched {len(matches)} events.")
                 return matches
-            except Exception:
-                logger.warning(f"[{bookmaker}] Non-JSON payload received")
+            except Exception as e:
+                # INSPECT RAW TEXT TO SEE WHAT CAME BACK
+                snippet = response.text[:150].replace("\n", "")
+                logger.warning(f"[{bookmaker}] Non-JSON response (Error: {e}). Raw snippet: {snippet}")
         else:
             logger.warning(f"[{bookmaker}] HTTP Status {response.status_code}")
     except Exception as e:
         logger.error(f"[{bookmaker}] HTTPX Fetch Error: {e}")
     return []
+
 
 async def fetch_with_playwright(url: str, bookmaker: str) -> List[Dict[str, Any]]:
     """Playwright worker fallback for strict WAF protection."""
