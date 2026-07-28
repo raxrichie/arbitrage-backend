@@ -1,5 +1,5 @@
-# Use Microsoft's official pre-configured Playwright Python image
-FROM mcr.microsoft.com/playwright/python:v1.45.0-jammy
+# Use Microsoft's official pre-configured Playwright Python image (v1.44.0)
+FROM mcr.microsoft.com/playwright/python:v1.44.0-jammy
 
 # Set working directory inside container
 WORKDIR /app
@@ -7,7 +7,7 @@ WORKDIR /app
 # Prevent Python from writing pyc files and buffer outputs
 ENV PYTHONUNBUFFERED=1
 
-# Copy requirements file first to leverage Docker caching
+# Copy requirements file first
 COPY requirements.txt .
 
 # Install Python application dependencies
