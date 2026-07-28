@@ -1,4 +1,4 @@
-# Use official Python image with Debian bookworm for Playwright compatibility
+# Use official Python base image
 FROM python:3.11-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE 1
@@ -25,13 +25,13 @@ RUN apt-get update && apt-get install -y \
     libasound2 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python requirements
+# Install Python requirements first
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright Chromium browser binaries
-RUN playwright install chromium
-RUN playwright install-deps chromium
+# --- FIX: Use 'python -m playwright' instead of raw 'playwright' ---
+RUN python -m playwright install chromium
+RUN python -m playwright install-deps chromium
 
 # Copy application code
 COPY . .
