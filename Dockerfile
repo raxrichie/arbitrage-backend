@@ -7,10 +7,15 @@ WORKDIR /app
 # Prevent Python from writing pyc files and buffer outputs
 ENV PYTHONUNBUFFERED=1
 
+# Install system utilities needed for Playwright package installation
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy requirements file first to utilize Docker layer caching
 COPY requirements.txt .
 
-# Install Python packages and Playwright Chromium with browser dependencies
+# Install Python packages, Playwright Chromium, and OS dependencies
 RUN pip install --no-cache-dir -r requirements.txt && \
     playwright install chromium && \
     playwright install-deps chromium
