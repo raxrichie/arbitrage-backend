@@ -73,6 +73,7 @@ async def intercept_network_json(browser: Browser, url: str, bookmaker: str, url
                     pass
 
         page.on("response", handle_response)
+        logger.info(f"[{bookmaker.upper()}-INTERCEPTOR] Navigating to {url}...")
         await page.goto(url, wait_until="domcontentloaded", timeout=18000)
         await asyncio.sleep(wait_time)
         
@@ -93,50 +94,65 @@ async def intercept_network_json(browser: Browser, url: str, bookmaker: str, url
 
 
 # -------------------------------------------------------------------
-# PARSER ENGINE
+# TAILORED PARSER ENGINE
 # -------------------------------------------------------------------
 
 def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
     matches = []
     try:
+        # --- 1. BETIKA (EXACT KEY MAPPING) ---
         if bookmaker == "betika":
             events = data.get("data", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
-            if events and isinstance(events, list) and len(events) > 0:
-                logger.info(f"[BETIKA DUMP] Sample keys: {list(events[0].keys()) if isinstance(events[0], dict) else events[0]}")
-            
             for item in events:
                 if isinstance(item, dict):
-                    home = item.get("home_name") or item.get("homeTeam") or item.get("home") or item.get("home_team_name")
-                    away = item.get("away_name") or item.get("awayTeam") or item.get("away") or item.get("away_team_name")
+                    home = item.get("home_team")
+                    away = item.get("away_team")
                     
-                    o1, oX, o2 = 1.0, 1.0, 1.0
-                    raw_odds = item.get("home_odds") or item.get("odds")
-                    if isinstance(raw_odds, dict):
-                        o1 = safe_float(raw_odds.get("1") or item.get("home_odds"))
-                        oX = safe_float(raw_odds.get("X") or item.get("draw_odds"))
-                        o2 = safe_float(raw_odds.get("2") or item.get("away_odds"))
-                    elif isinstance(raw_odds, list):
-                        for market in raw_odds:
-                            if isinstance(market, dict):
-                                for outcome in market.get("odds", []):
-                                    display = str(outcome.get("display") or outcome.get("name") or "")
-                                    val = outcome.get("odd_value") or outcome.get("odd")
-                                    if display == "1": o1 = safe_float(val)
-                                    elif display == "X": oX = safe_float(val)
-                                    elif display == "2": o2 = safe_float(val)
+                    o1 = safe_float(item.get("home_odd"))
+                    oX = safe_float(item.get("neutral_odd"))
+                    o2 = safe_float(item.get("away_odd"))
 
                     if home and away:
                         matches.append({
                             "bookmaker": bookmaker,
-                            "id": str(item.get("id") or item.get("match_id") or ""),
+                            "id": str(item.get("match_id") or item.get("game_id") or ""),
                             "homeTeam": str(home),
                             "awayTeam": str(away),
-                            "league": str(item.get("competition_name") or item.get("league") or "Soccer"),
+                            "league": str(item.get("competition_name") or "Soccer"),
                             "startTime": str(item.get("start_time") or ""),
                             "odds": {"1": o1, "X": oX, "2": o2}
                         })
             return matches
 
+        # --- 2. LEONBET ---
+        if bookmaker == "leonbet":
+            events = data.get("events", []) if isinstance(data, dict) else []
+            for item in events:
+                if isinstance(item, dict):
+                    home = item.get("homeTeam", {}).get("name") or item.get("home")
+                    away = item.get("awayTeam", {}).get("name") or item.get("away")
+                    
+                    o1, oX, o2 = 1.0, 1.0, 1.0
+                    for runner in item.get("runners", []):
+                        tags = runner.get("tags", [])
+                        price = runner.get("price")
+                        if "HOME" in tags or runner.get("type") == "1": o1 = safe_float(price)
+                        elif "DRAW" in tags or runner.get("type") == "X": oX = safe_float(price)
+                        elif "AWAY" in tags or runner.get("type") == "2": o2 = safe_float(price)
+
+                    if home and away:
+                        matches.append({
+                            "bookmaker": bookmaker,
+                            "id": str(item.get("id") or ""),
+                            "homeTeam": str(home),
+                            "awayTeam": str(away),
+                            "league": str(item.get("league", {}).get("name") or "Soccer"),
+                            "startTime": str(item.get("matchStartTime") or ""),
+                            "odds": {"1": o1, "X": oX, "2": o2}
+                        })
+            return matches
+
+        # --- 3. SPORTYBET ---
         if bookmaker == "sportybet":
             tournaments = data.get("data", {}).get("tournaments", []) if isinstance(data, dict) else []
             for tourney in tournaments:
@@ -164,6 +180,7 @@ def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
                         })
             return matches
 
+        # --- 4. BANGBET ---
         if bookmaker == "bangbet":
             groups = data.get("data", {}).get("groupList", []) if isinstance(data, dict) else []
             for group in groups:
@@ -191,7 +208,33 @@ def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
                         })
             return matches
 
-        # Generic Fallback
+        # --- 5. 1XBET / 22BET / HELABET (1X PLATFORM) ---
+        if bookmaker in ["1xbet", "22bet", "helabet"]:
+            events = data.get("Value", []) if isinstance(data, dict) else []
+            for item in events:
+                if isinstance(item, dict):
+                    home = item.get("O1") or item.get("HT")
+                    away = item.get("O2") or item.get("AT")
+                    o1, oX, o2 = 1.0, 1.0, 1.0
+                    for outcome in item.get("E", []):
+                        t = outcome.get("T")
+                        if t == 1: o1 = safe_float(outcome.get("C"))
+                        elif t == 2: oX = safe_float(outcome.get("C"))
+                        elif t == 3: o2 = safe_float(outcome.get("C"))
+
+                    if home and away:
+                        matches.append({
+                            "bookmaker": bookmaker,
+                            "id": str(item.get("I") or ""),
+                            "homeTeam": str(home),
+                            "awayTeam": str(away),
+                            "league": str(item.get("LE") or "Soccer"),
+                            "startTime": str(item.get("S") or ""),
+                            "odds": {"1": o1, "X": oX, "2": o2}
+                        })
+            return matches
+
+        # --- 6. GENERIC FALLBACK ENGINE ---
         events = data if isinstance(data, list) else (data.get("data") or data.get("events") or data.get("matches") or data.get("items") or [data] if isinstance(data, dict) else [])
         for item in events:
             if isinstance(item, dict):
@@ -259,14 +302,14 @@ async def scrape_all_sportsbooks() -> List[Dict[str, Any]]:
             if isinstance(res, list):
                 all_matches.extend(res)
 
-    # TIER 2: PLAYWRIGHT INTERCEPTORS (SEQUENTIAL BATCHING TO PREVENT RAM OVERLOAD/502)
+    # TIER 2: PLAYWRIGHT INTERCEPTORS (SEQUENTIAL BATCHING TO PREVENT RAM OVERLOAD)
     playwright_sites = [
-        ("1xbet", "https://1xbet.tz/en/line/football", ["getgames", "expressday", "line"]),
-        ("22bet", "https://22bet.co.tz/line/football", ["getgames", "expressday", "line"]),
-        ("sokabet", "https://sokabet.co.tz", ["gettopevents", "events"]),
-        ("premierbet", "https://www.premierbet.co.tz", ["highlights", "events"]),
-        ("betway", "https://www.betway.co.tz", ["highlights", "betbook"]),
-        ("meridianbet", "https://meridianbet.co.tz", ["events", "highlights"]),
+        ("1xbet", "https://1xbet.tz/en/line/football", ["getgames", "expressday", "line", "get1x2"]),
+        ("22bet", "https://22bet.co.tz/line/football", ["getgames", "expressday", "line", "get1x2"]),
+        ("sokabet", "https://sokabet.co.tz", ["gettopevents", "events", "sportsbook"]),
+        ("premierbet", "https://www.premierbet.co.tz", ["highlights", "events", "sports-api"]),
+        ("betway", "https://www.betway.co.tz", ["highlights", "betbook", "sportsapi"]),
+        ("meridianbet", "https://meridianbet.co.tz", ["events", "highlights", "api"]),
     ]
 
     try:
