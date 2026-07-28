@@ -239,12 +239,14 @@ def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
 async def get_betpawa(client: httpx.AsyncClient):
     url = "https://pawa-offering-service.betpawa.co.tz/offering/v1/events?sportId=1&limit=100"
     res = await fetch_api(client, url, "betpawa")
-    return res if len(res) > 0 else await fetch_api(client, "https://www.betpawa.co.tz/api/offering/v1/events", "betpawa")
+    if not res:
+        res = await fetch_api(client, "https://www.betpawa.co.tz/api/offering/v1/events", "betpawa")
+    return res if len(res) > 0 else await fetch_with_playwright("https://www.betpawa.co.tz", "betpawa")
 
 async def get_mostbet(client: httpx.AsyncClient):
     url = "https://mostbet.com/api/v1/line?sportId=1"
     res = await fetch_api(client, url, "mostbet")
-    return res if len(res) > 0 else await fetch_with_playwright("https://mostbet.co.tz", "mostbet")
+    return res if len(res) > 0 else await fetch_with_playwright("https://mostbet.co.tz/line/football", "mostbet")
 
 async def get_1win(client: httpx.AsyncClient):
     url = "https://1win.pro/api/v1/sports/1/events?limit=100"
@@ -255,23 +257,34 @@ async def get_888bet(client: httpx.AsyncClient):
     url = "https://sports-api.888bet.co.tz/v1/sports/1/events"
     extra_headers = {"Origin": "https://888bet.co.tz"}
     res = await fetch_api(client, url, "888bet", extra_headers=extra_headers)
-    return res if len(res) > 0 else await fetch_api(client, "https://sb2frontend-api.888bet.co.tz/api/Sports/GetEvents?sportId=1", "888bet")
+    if not res:
+        res = await fetch_api(client, "https://sb2frontend-api.888bet.co.tz/api/Sports/GetEvents?sportId=1", "888bet")
+    return res if len(res) > 0 else await fetch_with_playwright("https://888bet.tz", "888bet")
 
 async def get_kingbet(client: httpx.AsyncClient):
     url = "https://kingbet.co.tz/api/v1/sports/events?sport=football"
-    return await fetch_api(client, url, "kingbet")
+    res = await fetch_api(client, url, "kingbet")
+    return res if len(res) > 0 else await fetch_with_playwright("https://kingbet.co.tz", "kingbet")
 
 async def get_betika(client: httpx.AsyncClient):
-    return await fetch_api(client, "https://api.betika.com/v1/uo/matches?limit=100&sub_type=prematch", "betika")
+    url = "https://api.betika.com/v1/uo/matches?limit=100&sub_type=prematch"
+    res = await fetch_api(client, url, "betika")
+    return res if len(res) > 0 else await fetch_with_playwright("https://www.betika.com/en-tz/", "betika")
 
 async def get_sportybet(client: httpx.AsyncClient):
-    return await fetch_api(client, "https://www.sportybet.com/api/tz/factsCenter/pcUpcomingEvents?sportId=sr%3Asport%3A1&marketId=1%2C18%2C10%2C29%2C11%2C26%2C36%2C14%2C60100&pageSize=100&pageNum=1&option=1", "sportybet")
+    url = "https://www.sportybet.com/api/tz/factsCenter/pcUpcomingEvents?sportId=sr%3Asport%3A1&marketId=1%2C18%2C10%2C29%2C11%2C26%2C36%2C14%2C60100&pageSize=100&pageNum=1&option=1"
+    res = await fetch_api(client, url, "sportybet")
+    return res if len(res) > 0 else await fetch_with_playwright("https://www.sportybet.com/tz/", "sportybet")
 
 async def get_sportpesa(client: httpx.AsyncClient):
-    return await fetch_api(client, "https://www.sportpesa.co.tz/api/games/highlights?sportId=1", "sportpesa")
+    url = "https://www.sportpesa.co.tz/api/games/highlights?sportId=1"
+    res = await fetch_api(client, url, "sportpesa")
+    return res if len(res) > 0 else await fetch_with_playwright("https://www.sportpesa.co.tz/", "sportpesa")
 
 async def get_premierbet(client: httpx.AsyncClient):
-    return await fetch_api(client, "https://sports-api.premierbet.co.tz/v1/events/highlights?country=TZ&group=g2&platform=desktop&locale=sw&sportId=1&limit=10", "premierbet")
+    url = "https://sports-api.premierbet.co.tz/v1/events/highlights?country=TZ&group=g2&platform=desktop&locale=sw&sportId=1&limit=10"
+    res = await fetch_api(client, url, "premierbet")
+    return res if len(res) > 0 else await fetch_with_playwright("https://www.premierbet.co.tz/", "premierbet")
 
 async def get_1xbet(client: httpx.AsyncClient):
     url = "https://1xbet.tz/service-api/main-line-feed/v1/expressDay?cfView=3&country=181&gr=1499&lng=en&ref=398"
@@ -291,38 +304,47 @@ async def get_helabet(client: httpx.AsyncClient):
 async def get_meridianbet(client: httpx.AsyncClient):
     url = "https://meridianbet.co.tz/api/v1/events/highlights"
     res = await fetch_api(client, url, "meridianbet")
-    return res if len(res) > 0 else await fetch_with_playwright(url, "meridianbet")
+    return res if len(res) > 0 else await fetch_with_playwright("https://meridianbet.co.tz", "meridianbet")
 
 async def get_parimatch(client: httpx.AsyncClient):
     url = "https://parimatch.co.tz/api/v1/sports/1/prematch"
     res = await fetch_api(client, url, "parimatch")
-    return res if len(res) > 0 else await fetch_with_playwright(url, "parimatch")
+    return res if len(res) > 0 else await fetch_with_playwright("https://parimatch.co.tz", "parimatch")
 
 async def get_betway(client: httpx.AsyncClient):
-    return await fetch_api(client, "https://www.betway.co.tz/sportsapi/br/v1/BetBook/Highlights/?countryCode=TZ&sportId=soccer&Skip=0&Take=20&cultureCode=sw-TZ&isEsport=false&boostedOnly=false&marketTypes=[Win/Draw/Win]", "betway")
+    url = "https://www.betway.co.tz/sportsapi/br/v1/BetBook/Highlights/?countryCode=TZ&sportId=soccer&Skip=0&Take=20&cultureCode=sw-TZ&isEsport=false&boostedOnly=false&marketTypes=[Win/Draw/Win]"
+    res = await fetch_api(client, url, "betway")
+    return res if len(res) > 0 else await fetch_with_playwright("https://www.betway.co.tz", "betway")
 
 async def get_sokabet(client: httpx.AsyncClient):
-    return await fetch_api(client, "https://sb2frontend-altenar2.biahosted.com/api/Sportsbook/GetTopEvents?culture=en-GB&integration=sokabet", "sokabet")
+    url = "https://sb2frontend-altenar2.biahosted.com/api/Sportsbook/GetTopEvents?culture=en-GB&integration=sokabet"
+    res = await fetch_api(client, url, "sokabet")
+    return res if len(res) > 0 else await fetch_with_playwright("https://sokabet.co.tz", "sokabet")
 
 async def get_gsb(client: httpx.AsyncClient):
     url = "https://gsb.co.tz/services/evapi/event/GetSportsTree?statusId=0&eventTypeId=0"
     res = await fetch_api(client, url, "gsb")
-    return res if len(res) > 0 else await fetch_with_playwright(url, "gsb")
+    return res if len(res) > 0 else await fetch_with_playwright("https://gsb.co.tz", "gsb")
 
 async def get_wasafibet(client: httpx.AsyncClient):
     url = "https://api.wasafibet.com/wb/sportsbook?sport_id=soccer&src=1&producer=3&type=matches&platform=desktop"
     res = await fetch_api(client, url, "wasafibet")
-    return res if len(res) > 0 else await fetch_with_playwright(url, "wasafibet")
+    return res if len(res) > 0 else await fetch_with_playwright("https://wasafibet.com", "wasafibet")
 
 async def get_bangbet(client: httpx.AsyncClient):
-    return await fetch_api(client, "https://bet-api.bangbet.com/api/bet/match/listTop?country=tz", "bangbet")
+    url = "https://bet-api.bangbet.com/api/bet/match/listTop?country=tz"
+    res = await fetch_api(client, url, "bangbet")
+    return res if len(res) > 0 else await fetch_with_playwright("https://www.bangbet.com/tz/", "bangbet")
 
 async def get_leonbet(client: httpx.AsyncClient):
-    return await fetch_api(client, "https://leonbet.co.tz/api-2/betline/events/all?ctag=en-US", "leonbet")
+    url = "https://leonbet.co.tz/api-2/betline/events/all?ctag=en-US"
+    res = await fetch_api(client, url, "leonbet")
+    return res if len(res) > 0 else await fetch_with_playwright("https://leonbet.co.tz", "leonbet")
 
 async def get_thronebet(client: httpx.AsyncClient):
-    return await fetch_api(client, "https://api.thronebet.com/api/v2/multi", "thronebet")
-
+    url = "https://api.thronebet.com/api/v2/multi"
+    res = await fetch_api(client, url, "thronebet")
+    return res if len(res) > 0 else await fetch_with_playwright("https://thronebet.com", "thronebet")
 
 BOOKMAKER_MAP = {
     "betika": get_betika,
