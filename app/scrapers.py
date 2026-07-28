@@ -1,9 +1,8 @@
 import asyncio
 import logging
-import json
 import httpx
 from typing import Dict, List, Any, Optional
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, Browser
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("scrapers")
@@ -12,12 +11,9 @@ REAL_BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
-    "sec-ch-ua": '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
 }
 
-CUSTOM_TIMEOUT = httpx.Timeout(connect=20.0, read=30.0, write=20.0, pool=20.0)
+CUSTOM_TIMEOUT = httpx.Timeout(connect=15.0, read=20.0, write=15.0, pool=15.0)
 
 
 def safe_float(val: Any, default: float = 1.0) -> float:
@@ -46,11 +42,10 @@ async def fetch_api(client: httpx.AsyncClient, url: str, bookmaker: str, extra_h
                         logger.info(f"[{bookmaker.upper()}] HTTP 200 OK | 0 matches. List Length: {len(data)}")
                 else:
                     logger.info(f"[{bookmaker.upper()}] Successfully parsed {len(matches)} matches.")
-                
                 return matches
 
             except Exception as parse_err:
-                logger.error(f"[{bookmaker}] JSON Decode/Parser Exception: {repr(parse_err)}")
+                logger.error(f"[{bookmaker}] JSON Parse Error: {repr(parse_err)}")
         else:
             logger.warning(f"[{bookmaker}] HTTP Status {response.status_code}")
     except Exception as e:
@@ -58,35 +53,42 @@ async def fetch_api(client: httpx.AsyncClient, url: str, bookmaker: str, extra_h
     return []
 
 
-async def fetch_with_playwright(url: str, bookmaker: str) -> List[Dict[str, Any]]:
-    """Playwright worker using stable Chromium flags for Docker/Render environments."""
+async def intercept_network_json(browser: Browser, url: str, bookmaker: str, url_keywords: List[str], wait_time: int = 5) -> List[Dict[str, Any]]:
+    captured_payloads = []
+    all_matches = []
+
     try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-dev-shm-usage",
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox"
-                ]
-            )
-            context = await browser.new_context(user_agent=REAL_BROWSER_HEADERS["User-Agent"])
-            page = await context.new_page()
-            
-            response = await page.goto(url, wait_until="networkidle", timeout=25000)
-            if response and response.status == 200:
+        context = await browser.new_context(user_agent=REAL_BROWSER_HEADERS["User-Agent"])
+        page = await context.new_page()
+
+        async def handle_response(response):
+            res_url = response.url.lower()
+            if any(kw in res_url for kw in url_keywords):
                 try:
-                    data = await response.json()
-                    await browser.close()
-                    matches = parse_raw_data(bookmaker, data)
-                    logger.info(f"[{bookmaker.upper()}-PLAYWRIGHT] Successfully parsed {len(matches)} matches.")
-                    return matches
+                    ct = response.headers.get("content-type", "")
+                    if "json" in ct or "text/plain" in ct:
+                        json_data = await response.json()
+                        captured_payloads.append(json_data)
                 except Exception:
                     pass
-            await browser.close()
+
+        page.on("response", handle_response)
+        await page.goto(url, wait_until="domcontentloaded", timeout=18000)
+        await asyncio.sleep(wait_time)
+        
+        await page.close()
+        await context.close()
+
+        for payload in captured_payloads:
+            parsed = parse_raw_data(bookmaker, payload)
+            all_matches.extend(parsed)
+
+        unique_matches = list({m["id"]: m for m in all_matches if m.get("id")}.values()) if all_matches else []
+        logger.info(f"[{bookmaker.upper()}-INTERCEPTOR] Parsed {len(unique_matches)} unique matches.")
+        return unique_matches
+
     except Exception as e:
-        logger.error(f"[{bookmaker}] Playwright Error ({type(e).__name__}): {repr(e)}")
+        logger.error(f"[{bookmaker}-INTERCEPTOR] Error ({type(e).__name__}): {repr(e)}")
     return []
 
 
@@ -97,12 +99,10 @@ async def fetch_with_playwright(url: str, bookmaker: str) -> List[Dict[str, Any]
 def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
     matches = []
     try:
-        # --- 1. Betika (Schema Logging Diagnostic) ---
         if bookmaker == "betika":
             events = data.get("data", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
             if events and isinstance(events, list) and len(events) > 0:
-                # LOG THE FIRST EVENT DICTIONARY TO REVEAL KEY NAMES IN TERMINAL LOGS
-                logger.info(f"[BETIKA DUMP] First event sample keys/structure: {list(events[0].keys()) if isinstance(events[0], dict) else events[0]}")
+                logger.info(f"[BETIKA DUMP] Sample keys: {list(events[0].keys()) if isinstance(events[0], dict) else events[0]}")
             
             for item in events:
                 if isinstance(item, dict):
@@ -137,7 +137,6 @@ def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
                         })
             return matches
 
-        # --- 2. SportyBet (tournaments -> events) ---
         if bookmaker == "sportybet":
             tournaments = data.get("data", {}).get("tournaments", []) if isinstance(data, dict) else []
             for tourney in tournaments:
@@ -165,7 +164,6 @@ def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
                         })
             return matches
 
-        # --- 3. BangBet (groupList -> matchVoList) ---
         if bookmaker == "bangbet":
             groups = data.get("data", {}).get("groupList", []) if isinstance(data, dict) else []
             for group in groups:
@@ -193,13 +191,8 @@ def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
                         })
             return matches
 
-        # --- 4. Generic Fallback Engine ---
-        events = []
-        if isinstance(data, list):
-            events = data
-        elif isinstance(data, dict):
-            events = data.get("data") or data.get("events") or data.get("matches") or data.get("items") or [data]
-
+        # Generic Fallback
+        events = data if isinstance(data, list) else (data.get("data") or data.get("events") or data.get("matches") or data.get("items") or [data] if isinstance(data, dict) else [])
         for item in events:
             if isinstance(item, dict):
                 home = item.get("homeTeam") or item.get("home_team") or item.get("homeName") or item.get("team1")
@@ -227,7 +220,7 @@ def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
 
 
 # -------------------------------------------------------------------
-# INDIVIDUAL SITE ROUTINES
+# SCRAPER MAP & BATCHED MASTER RUNNER
 # -------------------------------------------------------------------
 
 async def get_betika(client: httpx.AsyncClient):
@@ -239,55 +232,6 @@ async def get_sportybet(client: httpx.AsyncClient):
 async def get_bangbet(client: httpx.AsyncClient):
     return await fetch_api(client, "https://bet-api.bangbet.com/api/bet/match/listTop?country=tz", "bangbet")
 
-# ROUTE ALL ANTI-BOT / BLOCKED SITES THROUGH PLAYWRIGHT (STABLE CHROMIUM)
-async def get_1xbet(client: httpx.AsyncClient):
-    return await fetch_with_playwright("https://1xbet.tz/en/line/football", "1xbet")
-
-async def get_22bet(client: httpx.AsyncClient):
-    return await fetch_with_playwright("https://22bet.co.tz/line/football", "22bet")
-
-async def get_helabet(client: httpx.AsyncClient):
-    return await fetch_with_playwright("https://helabet.co.tz/line/football", "helabet")
-
-async def get_sokabet(client: httpx.AsyncClient):
-    return await fetch_with_playwright("https://sokabet.co.tz", "sokabet")
-
-async def get_premierbet(client: httpx.AsyncClient):
-    return await fetch_with_playwright("https://www.premierbet.co.tz", "premierbet")
-
-async def get_betway(client: httpx.AsyncClient):
-    return await fetch_with_playwright("https://www.betway.co.tz", "betway")
-
-async def get_thronebet(client: httpx.AsyncClient):
-    return await fetch_with_playwright("https://thronebet.com", "thronebet")
-
-async def get_meridianbet(client: httpx.AsyncClient):
-    return await fetch_with_playwright("https://meridianbet.co.tz", "meridianbet")
-
-async def get_wasafibet(client: httpx.AsyncClient):
-    return await fetch_with_playwright("https://wasafibet.com", "wasafibet")
-
-async def get_gsb(client: httpx.AsyncClient):
-    return await fetch_with_playwright("https://gsb.co.tz", "gsb")
-
-async def get_kingbet(client: httpx.AsyncClient):
-    return await fetch_with_playwright("https://kingbet.co.tz", "kingbet")
-
-async def get_betpawa(client: httpx.AsyncClient):
-    return await fetch_with_playwright("https://www.betpawa.co.tz", "betpawa")
-
-async def get_888bet(client: httpx.AsyncClient):
-    return await fetch_with_playwright("https://888bet.tz", "888bet")
-
-async def get_parimatch(client: httpx.AsyncClient):
-    return await fetch_with_playwright("https://parimatch.co.tz", "parimatch")
-
-async def get_mostbet(client: httpx.AsyncClient):
-    return await fetch_with_playwright("https://mostbet.co.tz", "mostbet")
-
-async def get_1win(client: httpx.AsyncClient):
-    return await fetch_with_playwright("https://1win.pro", "1win")
-
 async def get_sportpesa(client: httpx.AsyncClient):
     return await fetch_api(client, "https://www.sportpesa.co.tz/api/games/highlights?sportId=1", "sportpesa")
 
@@ -298,35 +242,45 @@ async def get_leonbet(client: httpx.AsyncClient):
 BOOKMAKER_MAP = {
     "betika": get_betika,
     "sportybet": get_sportybet,
-    "betpawa": get_betpawa,
-    "meridianbet": get_meridianbet,
-    "parimatch": get_parimatch,
-    "1xbet": get_1xbet,
-    "22bet": get_22bet,
-    "1win": get_1win,
-    "mostbet": get_mostbet,
-    "helabet": get_helabet,
     "bangbet": get_bangbet,
-    "888bet": get_888bet,
-    "sokabet": get_sokabet,
-    "gsb": get_gsb,
-    "premierbet": get_premierbet,
-    "leonbet": get_leonbet,
-    "betway": get_betway,
     "sportpesa": get_sportpesa,
-    "kingbet": get_kingbet,
-    "thronebet": get_thronebet,
-    "wasafibet": get_wasafibet,
+    "leonbet": get_leonbet,
 }
 
 
 async def scrape_all_sportsbooks() -> List[Dict[str, Any]]:
-    async with httpx.AsyncClient(timeout=CUSTOM_TIMEOUT, follow_redirects=True) as client:
-        tasks = [func(client) for func in BOOKMAKER_MAP.values()]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
     all_matches = []
-    for res in results:
-        if isinstance(res, list):
-            all_matches.extend(res)
+
+    # TIER 1: FAST HTTPX CALLS IN PARALLEL
+    async with httpx.AsyncClient(timeout=CUSTOM_TIMEOUT, follow_redirects=True) as client:
+        fast_tasks = [func(client) for func in BOOKMAKER_MAP.values()]
+        results = await asyncio.gather(*fast_tasks, return_exceptions=True)
+        for res in results:
+            if isinstance(res, list):
+                all_matches.extend(res)
+
+    # TIER 2: PLAYWRIGHT INTERCEPTORS (SEQUENTIAL BATCHING TO PREVENT RAM OVERLOAD/502)
+    playwright_sites = [
+        ("1xbet", "https://1xbet.tz/en/line/football", ["getgames", "expressday", "line"]),
+        ("22bet", "https://22bet.co.tz/line/football", ["getgames", "expressday", "line"]),
+        ("sokabet", "https://sokabet.co.tz", ["gettopevents", "events"]),
+        ("premierbet", "https://www.premierbet.co.tz", ["highlights", "events"]),
+        ("betway", "https://www.betway.co.tz", ["highlights", "betbook"]),
+        ("meridianbet", "https://meridianbet.co.tz", ["events", "highlights"]),
+    ]
+
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage", "--no-sandbox"]
+            )
+            for bm, url, keywords in playwright_sites:
+                res = await intercept_network_json(browser, url, bm, keywords)
+                if isinstance(res, list):
+                    all_matches.extend(res)
+            await browser.close()
+    except Exception as e:
+        logger.error(f"Playwright Batch Error: {repr(e)}")
+
     return all_matches
