@@ -24,8 +24,18 @@ async def fetch_api(client: httpx.AsyncClient, url: str, bookmaker: str) -> List
     return []
 
 
+def safe_float(val: Any, default: float = 1.0) -> float:
+    """Helper to convert string/int/mixed odds values into clean floating points."""
+    try:
+        if val is None:
+            return default
+        parsed = float(val)
+        return parsed if parsed > 1.01 else default
+    except (ValueError, TypeError):
+        return default
+
 def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
-    """Standardizes output format from raw JSON into match objects."""
+    """Standardizes raw JSON output into normalized match objects with valid float odds."""
     matches = []
     try:
         if isinstance(data, dict):
@@ -37,23 +47,29 @@ def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
 
         for item in events:
             if isinstance(item, dict):
+                # Extract odds safely
+                raw_odds = item.get("odds") or {}
+                
+                o1 = safe_float(item.get("odds1") or item.get("homeOdds") or raw_odds.get("1"))
+                oX = safe_float(item.get("oddsX") or item.get("drawOdds") or raw_odds.get("X"))
+                o2 = safe_float(item.get("odds2") or item.get("awayOdds") or raw_odds.get("2"))
+
                 matches.append({
                     "bookmaker": bookmaker,
                     "id": str(item.get("id") or item.get("eventId") or item.get("gameId") or ""),
-                    "homeTeam": item.get("homeTeam") or item.get("home_team") or item.get("homeName") or "Home",
-                    "awayTeam": item.get("awayTeam") or item.get("away_team") or item.get("awayName") or "Away",
-                    "league": item.get("league") or item.get("categoryName") or "Soccer",
-                    "startTime": item.get("startTime") or item.get("eventDate") or "",
+                    "homeTeam": str(item.get("homeTeam") or item.get("home_team") or item.get("homeName") or "Home"),
+                    "awayTeam": str(item.get("awayTeam") or item.get("away_team") or item.get("awayName") or "Away"),
+                    "league": str(item.get("league") or item.get("categoryName") or "Soccer"),
+                    "startTime": str(item.get("startTime") or item.get("eventDate") or ""),
                     "odds": {
-                        "1": item.get("odds1") or item.get("homeOdds") or 1.0,
-                        "X": item.get("oddsX") or item.get("drawOdds") or 1.0,
-                        "2": item.get("odds2") or item.get("awayOdds") or 1.0,
+                        "1": o1,
+                        "X": oX,
+                        "2": o2
                     }
                 })
     except Exception as e:
         logger.error(f"[{bookmaker}] Parser Error: {e}")
     return matches
-
 
 # --- INDIVIDUAL BOOKMAKER FETCH FUNCTIONS ---
 
