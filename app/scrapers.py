@@ -49,6 +49,7 @@ async def fetch_api(client: httpx.AsyncClient, url: str, bookmaker: str, extra_h
 async def intercept_network_json(browser: Browser, url: str, bookmaker: str, url_keywords: List[str], wait_time: int = 6) -> List[Dict[str, Any]]:
     captured_payloads = []
     all_matches = []
+    bm_label = bookmaker.upper()
 
     try:
         context = await browser.new_context(
@@ -68,11 +69,10 @@ async def intercept_network_json(browser: Browser, url: str, bookmaker: str, url
                         pass
 
         page.on("response", handle_response)
-        logger.info(f"[{bookmaker.upper}-INTERCEPTOR] Navigating to {url}...")
+        logger.info(f"[{bm_label}-INTERCEPTOR] Navigating to {url}...")
         
         await page.goto(url, wait_until="domcontentloaded", timeout=25000)
         
-        # Trigger lazy-loaded SPA network calls by scrolling
         try:
             await page.evaluate("window.scrollBy(0, 500)")
         except Exception:
@@ -83,16 +83,16 @@ async def intercept_network_json(browser: Browser, url: str, bookmaker: str, url
         await page.close()
         await context.close()
 
-        logger.info(f"[{bookmaker.upper()}-INTERCEPTOR] Intercepted {len(captured_payloads)} API responses matching keywords.")
+        logger.info(f"[{bm_label}-INTERCEPTOR] Intercepted {len(captured_payloads)} API responses matching keywords.")
 
         for res_url, payload in captured_payloads:
             parsed = parse_raw_data(bookmaker, payload)
             if len(parsed) == 0 and isinstance(payload, dict):
-                logger.info(f"[{bookmaker.upper()}-PAYLOAD DUMP] URL: {res_url[:80]}... | Keys: {list(payload.keys())[:10]}")
+                logger.info(f"[{bm_label}-PAYLOAD DUMP] URL: {res_url[:80]}... | Keys: {list(payload.keys())[:10]}")
             all_matches.extend(parsed)
 
         unique_matches = list({m["match_id"]: m for m in all_matches if m.get("match_id")}.values()) if all_matches else []
-        logger.info(f"[{bookmaker.upper()}-INTERCEPTOR] Parsed {len(unique_matches)} unique matches.")
+        logger.info(f"[{bm_label}-INTERCEPTOR] Parsed {len(unique_matches)} unique matches.")
         return unique_matches
 
     except Exception as e:
@@ -101,7 +101,7 @@ async def intercept_network_json(browser: Browser, url: str, bookmaker: str, url
 
 
 # -------------------------------------------------------------------
-# NORMALIZED PARSER ENGINE (Android APK Schema Compliant)
+# NORMALIZED PARSER ENGINE
 # -------------------------------------------------------------------
 
 def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
@@ -129,7 +129,37 @@ def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
                         })
             return matches
 
-        # --- 2. 1XCORP ENGINE CLONES ---
+        # --- 2. SPORTPESA ---
+        if bookmaker == "sportpesa":
+            events = data.get("data", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+            for item in events:
+                if isinstance(item, dict):
+                    home = item.get("homeTeam", {}).get("name") or item.get("homeTeam")
+                    away = item.get("awayTeam", {}).get("name") or item.get("awayTeam")
+                    o1, oX, o2 = 1.0, 1.0, 1.0
+                    for market in item.get("markets", []):
+                        if market.get("name") == "1X2":
+                            for selection in market.get("selections", []):
+                                sel_name = str(selection.get("name"))
+                                if sel_name in ["1", "Home"]: o1 = safe_float(selection.get("odds"))
+                                elif sel_name in ["X", "Draw"]: oX = safe_float(selection.get("odds"))
+                                elif sel_name in ["2", "Away"]: o2 = safe_float(selection.get("odds"))
+
+                    if home and away:
+                        matches.append({
+                            "match_id": str(item.get("id") or ""),
+                            "home_team": str(home),
+                            "away_team": str(away),
+                            "competition": str(item.get("tournament", {}).get("name") or "Soccer"),
+                            "home_odds": o1,
+                            "draw_odds": oX,
+                            "away_odds": o2,
+                            "bookmaker_id": bookmaker,
+                            "timestamp": ts,
+                        })
+            return matches
+
+        # --- 3. 1XCORP ENGINE CLONES ---
         if bookmaker in ["1xbet", "22bet", "helabet", "mostbet", "betwinner", "melbet", "megapari", "1xbit"]:
             events = data.get("Value", []) if isinstance(data, dict) else []
             for item in events:
@@ -157,7 +187,7 @@ def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
                         })
             return matches
 
-        # --- 3. SPORTYBET ---
+        # --- 4. SPORTYBET ---
         if bookmaker == "sportybet":
             tournaments = data.get("data", {}).get("tournaments", []) if isinstance(data, dict) else []
             for tourney in tournaments:
@@ -187,7 +217,7 @@ def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
                         })
             return matches
 
-        # --- 4. BANGBET ---
+        # --- 5. BANGBET ---
         if bookmaker == "bangbet":
             groups = data.get("data", {}).get("groupList", []) if isinstance(data, dict) else []
             for group in groups:
@@ -217,7 +247,7 @@ def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
                         })
             return matches
 
-        # --- 5. LEONBET ---
+        # --- 6. LEONBET ---
         if bookmaker == "leonbet":
             events = data.get("events", []) if isinstance(data, dict) else []
             for item in events:
@@ -246,7 +276,7 @@ def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
                         })
             return matches
 
-        # --- 6. GENERIC FALLBACK ENGINE ---
+        # --- 7. GENERIC FALLBACK ENGINE ---
         events = data if isinstance(data, list) else (data.get("data") or data.get("events") or data.get("matches") or data.get("items") or [data] if isinstance(data, dict) else [])
         for item in events:
             if isinstance(item, dict):
@@ -277,7 +307,7 @@ def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
 
 
 # -------------------------------------------------------------------
-# INDIVIDUAL BOOKMAKER ROUTINES (33 TOTAL)
+# INDIVIDUAL BOOKMAKER ROUTINES
 # -------------------------------------------------------------------
 
 # --- TIER 1: FAST API SCRAPERS ---
@@ -289,20 +319,13 @@ async def fetch_leonbet_odds(c: httpx.AsyncClient): return await fetch_api(c, "h
 async def fetch_betpawa_odds(c: httpx.AsyncClient): return await fetch_api(c, "https://www.betpawa.co.tz/api/sportsbook/v1/events?sportId=1", "betpawa")
 async def fetch_gsb_odds(c: httpx.AsyncClient): return await fetch_api(c, "https://gsb.co.tz/services/evapi/event/GetSportsTree?statusId=0&eventTypeId=0", "gsb")
 async def fetch_premierbet_odds(c: httpx.AsyncClient): return await fetch_api(c, "https://sports-api.premierbet.co.tz/v1/events/highlights?country=TZ&group=g2&platform=desktop&locale=sw&sportId=1&limit=20", "premierbet")
-async def fetch_mozzartbet_odds(c: httpx.AsyncClient): return await fetch_api(c, "https://mozzartbet.co.tz/m3-sport-api/v1/events/active", "mozzartbet")
-async def fetch_mbet_odds(c: httpx.AsyncClient): return await fetch_api(c, "https://m-bet.co.tz/api/sportsbook/highlights", "mbet")
-async def fetch_odibets_odds(c: httpx.AsyncClient): return await fetch_api(c, "https://odibets.co.tz/api/v1/matches/highlights", "odibets")
 
-# --- TIER 2: 1XBET ENGINE CLONES ---
-async def fetch_1xbet_odds(c: httpx.AsyncClient): return await fetch_api(c, "https://1xbet.tz/service-api/main-line-feed/v1/expressDay?cfView=3&country=181&gr=1499&lng=en", "1xbet")
-async def fetch_22bet_odds(c: httpx.AsyncClient): return await fetch_api(c, "https://22bet.co.tz/service-api/main-line-feed/v1/expressDay?cfView=3&country=181&gr=1499&lng=en", "22bet")
-async def fetch_helabet_odds(c: httpx.AsyncClient): return await fetch_api(c, "https://helabet.co.tz/service-api/main-line-feed/v1/expressDay?cfView=3&country=181&gr=772&lng=en", "helabet")
+# --- TIER 2: 1XBET ENGINE CLONES (Updated endpoints) ---
+async def fetch_1xbet_odds(c: httpx.AsyncClient): return await fetch_api(c, "https://1xbet.tz/service-api/main-line-feed/v1/desktop/sports/1", "1xbet")
+async def fetch_22bet_odds(c: httpx.AsyncClient): return await fetch_api(c, "https://22bet.co.tz/service-api/main-line-feed/v1/desktop/sports/1", "22bet")
+async def fetch_helabet_odds(c: httpx.AsyncClient): return await fetch_api(c, "https://helabet.co.tz/service-api/main-line-feed/v1/desktop/sports/1", "helabet")
 async def fetch_mostbet_odds(c: httpx.AsyncClient): return await fetch_api(c, "https://mostbet.co.tz/api/v1/line?sportId=1", "mostbet")
-async def fetch_betwinner_odds(c: httpx.AsyncClient): return await fetch_api(c, "https://betwinner.co.tz/service-api/main-line-feed/v1/expressDay?cfView=3&country=181&lng=en", "betwinner")
-async def fetch_melbet_odds(c: httpx.AsyncClient): return await fetch_api(c, "https://melbet.co.tz/service-api/main-line-feed/v1/expressDay?cfView=3&country=181&lng=en", "melbet")
-async def fetch_megapari_odds(c: httpx.AsyncClient): return await fetch_api(c, "https://megapari.co.tz/service-api/main-line-feed/v1/expressDay?cfView=3&country=181&lng=en", "megapari")
-async def fetch_1xbit_odds(c: httpx.AsyncClient): return await fetch_api(c, "https://1xbit.com/service-api/main-line-feed/v1/expressDay?cfView=3&lng=en", "1xbit")
-
+async def fetch_betwinner_odds(c: httpx.AsyncClient): return await fetch_api(c, "https://betwinner.co.tz/service-api/main-line-feed/v1/desktop/sports/1", "betwinner")
 
 FAST_API_BOOKMAKERS = {
     "betika": fetch_betika_odds,
@@ -313,9 +336,6 @@ FAST_API_BOOKMAKERS = {
     "betpawa": fetch_betpawa_odds,
     "gsb": fetch_gsb_odds,
     "premierbet": fetch_premierbet_odds,
-    "mozzartbet": fetch_mozzartbet_odds,
-    "mbet": fetch_mbet_odds,
-    "odibets": fetch_odibets_odds,
 }
 
 ONEX_ENGINE_BOOKMAKERS = {
@@ -324,14 +344,11 @@ ONEX_ENGINE_BOOKMAKERS = {
     "helabet": fetch_helabet_odds,
     "mostbet": fetch_mostbet_odds,
     "betwinner": fetch_betwinner_odds,
-    "melbet": fetch_melbet_odds,
-    "megapari": fetch_megapari_odds,
-    "1xbit": fetch_1xbit_odds,
 }
 
-# --- TIER 3: PLAYWRIGHT SITES (Direct Football Subpaths & Intercept Keywords) ---
+# --- TIER 3: PLAYWRIGHT SITES (Direct Subpaths & Expanded Keywords) ---
 PLAYWRIGHT_SITES = [
-    ("parimatch", "https://parimatch.co.tz/en/football", ["prematch", "sports", "events", "v1", "line"]),
+    ("parimatch", "https://parimatch.co.tz/en/football", ["prematch", "sports", "events", "v1", "line", "apg", "sportsbook"]),
     ("betway", "https://www.betway.co.tz/sport/soccer", ["highlights", "betbook", "sportsapi", "event"]),
     ("meridianbet", "https://meridianbet.co.tz/en/betting/football", ["events", "highlights", "api", "v1"]),
     ("sokabet", "https://sokabet.co.tz", ["gettopevents", "events", "sportsbook", "gettop"]),
@@ -340,11 +357,6 @@ PLAYWRIGHT_SITES = [
     ("wasafibet", "https://wasafibet.com", ["sportsbook", "matches", "wb"]),
     ("kingbet", "https://kingbet.co.tz", ["events", "redis_data", "sports"]),
     ("thronebet", "https://thronebet.com", ["multi", "v2", "api"]),
-    ("pmbet", "https://pmbet.co.tz", ["events", "highlights"]),
-    ("10bet", "https://10bet.co.tz", ["sports", "events"]),
-    ("winprincess", "https://winprincess.co.tz", ["events", "sportsbook"]),
-    ("playmaster", "https://playmaster.co.tz", ["events", "sports"]),
-    ("betafriq", "https://betafriq.co.tz", ["events", "highlights"]),
 ]
 
 PLAYWRIGHT_BOOKMAKERS = {bm: None for bm, _, _ in PLAYWRIGHT_SITES}
@@ -359,7 +371,7 @@ BOOKMAKER_MAP = {
 async def scrape_all_sportsbooks() -> List[Dict[str, Any]]:
     all_matches = []
 
-    # TIER 1 & TIER 2: FAST DIRECT HTTP CALLS
+    # TIER 1 & TIER 2: DIRECT HTTP CALLS
     async with httpx.AsyncClient(timeout=CUSTOM_TIMEOUT, follow_redirects=True) as client:
         fast_funcs = [func for func in {**FAST_API_BOOKMAKERS, **ONEX_ENGINE_BOOKMAKERS}.values() if func]
         tasks = [func(client) for func in fast_funcs]
@@ -368,7 +380,7 @@ async def scrape_all_sportsbooks() -> List[Dict[str, Any]]:
             if isinstance(res, list):
                 all_matches.extend(res)
 
-    # TIER 3: PLAYWRIGHT INTERCEPTORS (SEQUENTIAL BATCHING)
+    # TIER 3: PLAYWRIGHT INTERCEPTORS
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(
