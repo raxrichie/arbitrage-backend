@@ -77,17 +77,29 @@ async def fetch_with_playwright(url: str, bookmaker: str) -> List[Dict[str, Any]
 def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
     matches = []
     try:
-        # --- FIX 1: Betika & Direct Top-Level List Objects ---
-        if isinstance(data, list):
-            for item in data:
+        # --- 1. Betika (List of Matches or Markets) ---
+        if bookmaker == "betika":
+            events = data if isinstance(data, list) else data.get("data", [])
+            for item in events:
                 if isinstance(item, dict):
-                    home = item.get("home_name") or item.get("homeTeam") or item.get("home") or item.get("team1")
-                    away = item.get("away_name") or item.get("awayTeam") or item.get("away") or item.get("team2")
-                    raw_odds = item.get("odds") or {}
+                    home = item.get("home_name") or item.get("homeTeam") or item.get("home")
+                    away = item.get("away_name") or item.get("awayTeam") or item.get("away")
                     
-                    o1 = safe_float(item.get("home_odds") or item.get("odds1") or raw_odds.get("1"))
-                    oX = safe_float(item.get("draw_odds") or item.get("oddsX") or raw_odds.get("X"))
-                    o2 = safe_float(item.get("away_odds") or item.get("odds2") or raw_odds.get("2"))
+                    o1, oX, o2 = 1.0, 1.0, 1.0
+                    # Handle rawodds or market list
+                    raw_odds = item.get("home_odds") or item.get("odds")
+                    if isinstance(raw_odds, dict):
+                        o1 = safe_float(raw_odds.get("1") or item.get("home_odds"))
+                        oX = safe_float(raw_odds.get("X") or item.get("draw_odds"))
+                        o2 = safe_float(raw_odds.get("2") or item.get("away_odds"))
+                    elif isinstance(raw_odds, list):
+                        for market in raw_odds:
+                            for outcome in market.get("odds", []):
+                                display = outcome.get("display") or outcome.get("name")
+                                val = outcome.get("odd_value") or outcome.get("odd")
+                                if display == "1": o1 = safe_float(val)
+                                elif display == "X": oX = safe_float(val)
+                                elif display == "2": o2 = safe_float(val)
 
                     if home and away:
                         matches.append({
@@ -95,82 +107,27 @@ def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
                             "id": str(item.get("id") or item.get("match_id") or ""),
                             "homeTeam": str(home),
                             "awayTeam": str(away),
-                            "league": str(item.get("competition_name") or item.get("league") or "Soccer"),
+                            "league": str(item.get("competition_name") or "Soccer"),
                             "startTime": str(item.get("start_time") or ""),
                             "odds": {"1": o1, "X": oX, "2": o2}
                         })
             return matches
 
-        # --- FIX 2: Dictionary Payloads ---
-        if isinstance(data, dict):
-            # A. 1xBet / 22Bet / Helabet Schema
-            if bookmaker in ["1xbet", "22bet", "helabet"]:
-                events = data.get("Value", [])
-                for item in events:
-                    if isinstance(item, dict):
-                        home = item.get("O1") or item.get("HT")
-                        away = item.get("O2") or item.get("AT")
-                        o1, oX, o2 = 1.0, 1.0, 1.0
-                        for outcome in item.get("E", []):
-                            t = outcome.get("T")
-                            if t == 1: o1 = safe_float(outcome.get("C"))
-                            elif t == 2: oX = safe_float(outcome.get("C"))
-                            elif t == 3: o2 = safe_float(outcome.get("C"))
-
-                        if home and away:
-                            matches.append({
-                                "bookmaker": bookmaker,
-                                "id": str(item.get("I") or ""),
-                                "homeTeam": str(home),
-                                "awayTeam": str(away),
-                                "league": str(item.get("LE") or "Soccer"),
-                                "startTime": str(item.get("S") or ""),
-                                "odds": {"1": o1, "X": oX, "2": o2}
-                            })
-                return matches
-
-            # B. Sokabet / Altenar SportsTree Schema
-            if bookmaker == "sokabet":
-                sports = data.get("Sports") or data.get("sports") or []
-                for sport in sports:
-                    for comp in sport.get("Competitions", []):
-                        for event in comp.get("Events", []):
-                            home = event.get("HomeTeam") or event.get("homeTeam")
-                            away = event.get("AwayTeam") or event.get("awayTeam")
-                            
-                            o1, oX, o2 = 1.0, 1.0, 1.0
-                            for market in event.get("Markets", []):
-                                for option in market.get("Options", []):
-                                    name = str(option.get("Name") or option.get("type"))
-                                    if name == "1": o1 = safe_float(option.get("Price"))
-                                    elif name in ["X", "Draw"]: oX = safe_float(option.get("Price"))
-                                    elif name == "2": o2 = safe_float(option.get("Price"))
-
-                            if home and away:
-                                matches.append({
-                                    "bookmaker": bookmaker,
-                                    "id": str(event.get("EventId") or event.get("id") or ""),
-                                    "homeTeam": str(home),
-                                    "awayTeam": str(away),
-                                    "league": str(comp.get("Name") or "Soccer"),
-                                    "startTime": str(event.get("EventDate") or ""),
-                                    "odds": {"1": o1, "X": oX, "2": o2}
-                                })
-                return matches
-
-            # C. SportyBet Schema
-            if bookmaker == "sportybet":
-                events = data.get("data", {}).get("events", [])
-                for item in events:
+        # --- 2. SportyBet (Tournaments -> Events) ---
+        if bookmaker == "sportybet":
+            tournaments = data.get("data", {}).get("tournaments", [])
+            for tourney in tournaments:
+                for item in tourney.get("events", []):
                     home = item.get("homeTeamName")
                     away = item.get("awayTeamName")
                     o1, oX, o2 = 1.0, 1.0, 1.0
                     for market in item.get("markets", []):
-                        for outcome in market.get("outcomes", []):
-                            desc = outcome.get("desc")
-                            if desc == "1": o1 = safe_float(outcome.get("odds"))
-                            elif desc == "X": oX = safe_float(outcome.get("odds"))
-                            elif desc == "2": o2 = safe_float(outcome.get("odds"))
+                        if market.get("id") == "1" or market.get("name") in ["1X2", "3-Way"]:
+                            for outcome in market.get("outcomes", []):
+                                desc = str(outcome.get("desc"))
+                                if desc in ["1", "Home"]: o1 = safe_float(outcome.get("odds"))
+                                elif desc in ["X", "Draw"]: oX = safe_float(outcome.get("odds"))
+                                elif desc in ["2", "Away"]: o2 = safe_float(outcome.get("odds"))
 
                     if home and away:
                         matches.append({
@@ -178,39 +135,98 @@ def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
                             "id": str(item.get("eventId") or ""),
                             "homeTeam": str(home),
                             "awayTeam": str(away),
-                            "league": str(item.get("leagueName") or "Soccer"),
+                            "league": str(tourney.get("name") or "Soccer"),
                             "startTime": str(item.get("estimateStartTime") or ""),
                             "odds": {"1": o1, "X": oX, "2": o2}
                         })
-                return matches
+            return matches
 
-            # D. Generic Fallback
-            events = data.get("data") or data.get("events") or data.get("matches") or data.get("items") or data.get("elements") or [data]
-            for item in events:
-                if isinstance(item, dict):
-                    home = item.get("homeTeam") or item.get("home_team") or item.get("homeName") or item.get("team1")
-                    away = item.get("awayTeam") or item.get("away_team") or item.get("awayName") or item.get("team2")
-                    raw_odds = item.get("odds") or {}
-                    o1 = safe_float(item.get("odds1") or item.get("homeOdds") or raw_odds.get("1"))
-                    oX = safe_float(item.get("oddsX") or item.get("drawOdds") or raw_odds.get("X"))
-                    o2 = safe_float(item.get("odds2") or item.get("awayOdds") or raw_odds.get("2"))
+        # --- 3. BangBet (groupList -> matchVoList) ---
+        if bookmaker == "bangbet":
+            groups = data.get("data", {}).get("groupList", [])
+            for group in groups:
+                for match_vo in group.get("matchVoList", []):
+                    home = match_vo.get("homeTeamName")
+                    away = match_vo.get("awayTeamName")
+                    o1, oX, o2 = 1.0, 1.0, 1.0
+                    for market in match_vo.get("marketList", []):
+                        for m_item in market.get("markets", []):
+                            for outcome in m_item.get("outcomes", []):
+                                desc = str(outcome.get("desc") or outcome.get("name"))
+                                if desc in ["1", home]: o1 = safe_float(outcome.get("odds"))
+                                elif desc in ["X", "draw", "Draw"]: oX = safe_float(outcome.get("odds"))
+                                elif desc in ["2", away]: o2 = safe_float(outcome.get("odds"))
 
                     if home and away:
                         matches.append({
                             "bookmaker": bookmaker,
-                            "id": str(item.get("id") or item.get("eventId") or ""),
+                            "id": str(match_vo.get("matchId") or ""),
                             "homeTeam": str(home),
                             "awayTeam": str(away),
-                            "league": str(item.get("league") or "Soccer"),
-                            "startTime": str(item.get("startTime") or ""),
+                            "league": str(group.get("groupName") or "Soccer"),
+                            "startTime": str(match_vo.get("startTime") or ""),
                             "odds": {"1": o1, "X": oX, "2": o2}
                         })
+            return matches
+
+        # --- 4. Sokabet (Result.Events or SportsTree) ---
+        if bookmaker == "sokabet":
+            res_events = data.get("Result", {}).get("Events", []) or data.get("Events", [])
+            if res_events:
+                for event in res_events:
+                    home = event.get("HomeTeam") or event.get("homeTeam")
+                    away = event.get("AwayTeam") or event.get("awayTeam")
+                    o1, oX, o2 = 1.0, 1.0, 1.0
+                    for market in event.get("Markets", []):
+                        for option in market.get("Options", []):
+                            name = str(option.get("Name") or option.get("type"))
+                            if name == "1": o1 = safe_float(option.get("Price"))
+                            elif name in ["X", "Draw"]: oX = safe_float(option.get("Price"))
+                            elif name == "2": o2 = safe_float(option.get("Price"))
+
+                    if home and away:
+                        matches.append({
+                            "bookmaker": bookmaker,
+                            "id": str(event.get("EventId") or ""),
+                            "homeTeam": str(home),
+                            "awayTeam": str(away),
+                            "league": "Soccer",
+                            "startTime": str(event.get("EventDate") or ""),
+                            "odds": {"1": o1, "X": oX, "2": o2}
+                        })
+                return matches
+
+        # --- 5. Generic Default Fallback ---
+        events = []
+        if isinstance(data, list):
+            events = data
+        elif isinstance(data, dict):
+            events = data.get("data") or data.get("events") or data.get("matches") or data.get("items") or [data]
+
+        for item in events:
+            if isinstance(item, dict):
+                home = item.get("homeTeam") or item.get("home_team") or item.get("homeName") or item.get("team1")
+                away = item.get("awayTeam") or item.get("away_team") or item.get("awayName") or item.get("team2")
+                raw_odds = item.get("odds") or {}
+                o1 = safe_float(item.get("odds1") or item.get("homeOdds") or raw_odds.get("1"))
+                oX = safe_float(item.get("oddsX") or item.get("drawOdds") or raw_odds.get("X"))
+                o2 = safe_float(item.get("odds2") or item.get("awayOdds") or raw_odds.get("2"))
+
+                if home and away:
+                    matches.append({
+                        "bookmaker": bookmaker,
+                        "id": str(item.get("id") or item.get("eventId") or ""),
+                        "homeTeam": str(home),
+                        "awayTeam": str(away),
+                        "league": str(item.get("league") or "Soccer"),
+                        "startTime": str(item.get("startTime") or ""),
+                        "odds": {"1": o1, "X": oX, "2": o2}
+                    })
 
     except Exception as e:
         logger.error(f"[{bookmaker}] Parser Exception: {e}")
 
     return matches
-
 
 # -------------------------------------------------------------------
 # INDIVIDUAL SITE ROUTINES
