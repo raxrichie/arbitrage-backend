@@ -46,34 +46,49 @@ async def fetch_api(client: httpx.AsyncClient, url: str, bookmaker: str, extra_h
     return []
 
 
-async def intercept_network_json(browser: Browser, url: str, bookmaker: str, url_keywords: List[str], wait_time: int = 5) -> List[Dict[str, Any]]:
+async def intercept_network_json(browser: Browser, url: str, bookmaker: str, url_keywords: List[str], wait_time: int = 6) -> List[Dict[str, Any]]:
     captured_payloads = []
     all_matches = []
 
     try:
-        context = await browser.new_context(user_agent=REAL_BROWSER_HEADERS["User-Agent"])
+        context = await browser.new_context(
+            user_agent=REAL_BROWSER_HEADERS["User-Agent"],
+            viewport={"width": 1280, "height": 720}
+        )
         page = await context.new_page()
 
         async def handle_response(response):
-            res_url = response.url.lower()
-            if any(kw in res_url for kw in url_keywords):
-                try:
-                    ct = response.headers.get("content-type", "")
-                    if "json" in ct or "text/plain" in ct:
+            if response.status == 200:
+                res_url = response.url.lower()
+                if any(kw in res_url for kw in url_keywords):
+                    try:
                         json_data = await response.json()
-                        captured_payloads.append(json_data)
-                except Exception:
-                    pass
+                        captured_payloads.append((response.url, json_data))
+                    except Exception:
+                        pass
 
         page.on("response", handle_response)
+        logger.info(f"[{bookmaker.upper}-INTERCEPTOR] Navigating to {url}...")
+        
         await page.goto(url, wait_until="domcontentloaded", timeout=25000)
+        
+        # Trigger lazy-loaded SPA network calls by scrolling
+        try:
+            await page.evaluate("window.scrollBy(0, 500)")
+        except Exception:
+            pass
+
         await asyncio.sleep(wait_time)
         
         await page.close()
         await context.close()
 
-        for payload in captured_payloads:
+        logger.info(f"[{bookmaker.upper()}-INTERCEPTOR] Intercepted {len(captured_payloads)} API responses matching keywords.")
+
+        for res_url, payload in captured_payloads:
             parsed = parse_raw_data(bookmaker, payload)
+            if len(parsed) == 0 and isinstance(payload, dict):
+                logger.info(f"[{bookmaker.upper()}-PAYLOAD DUMP] URL: {res_url[:80]}... | Keys: {list(payload.keys())[:10]}")
             all_matches.extend(parsed)
 
         unique_matches = list({m["match_id"]: m for m in all_matches if m.get("match_id")}.values()) if all_matches else []
@@ -114,7 +129,7 @@ def parse_raw_data(bookmaker: str, data: Any) -> List[Dict[str, Any]]:
                         })
             return matches
 
-        # --- 2. 1XCORP ENGINE CLONES (1xbet, 22bet, helabet, mostbet, betwinner, melbet, megapari, 1xbit) ---
+        # --- 2. 1XCORP ENGINE CLONES ---
         if bookmaker in ["1xbet", "22bet", "helabet", "mostbet", "betwinner", "melbet", "megapari", "1xbit"]:
             events = data.get("Value", []) if isinstance(data, dict) else []
             for item in events:
@@ -314,14 +329,14 @@ ONEX_ENGINE_BOOKMAKERS = {
     "1xbit": fetch_1xbit_odds,
 }
 
-# --- TIER 3: PLAYWRIGHT SITES (Anti-Bot / Protected) ---
+# --- TIER 3: PLAYWRIGHT SITES (Direct Football Subpaths & Intercept Keywords) ---
 PLAYWRIGHT_SITES = [
-    ("parimatch", "https://parimatch.co.tz", ["prematch", "sports", "v1"]),
-    ("betway", "https://www.betway.co.tz", ["highlights", "betbook", "sportsapi"]),
-    ("meridianbet", "https://meridianbet.co.tz", ["events", "highlights", "api"]),
-    ("sokabet", "https://sokabet.co.tz", ["gettopevents", "events", "sportsbook"]),
-    ("888bet", "https://888bet.tz", ["sportsbook", "league-card", "highlights"]),
-    ("1win", "https://1win.pro", ["sports", "events", "v1"]),
+    ("parimatch", "https://parimatch.co.tz/en/football", ["prematch", "sports", "events", "v1", "line"]),
+    ("betway", "https://www.betway.co.tz/sport/soccer", ["highlights", "betbook", "sportsapi", "event"]),
+    ("meridianbet", "https://meridianbet.co.tz/en/betting/football", ["events", "highlights", "api", "v1"]),
+    ("sokabet", "https://sokabet.co.tz", ["gettopevents", "events", "sportsbook", "gettop"]),
+    ("888bet", "https://888bet.tz/en/sports/football", ["sportsbook", "league-card", "highlights", "api"]),
+    ("1win", "https://1win.pro/bets/home", ["sports", "events", "v1", "line"]),
     ("wasafibet", "https://wasafibet.com", ["sportsbook", "matches", "wb"]),
     ("kingbet", "https://kingbet.co.tz", ["events", "redis_data", "sports"]),
     ("thronebet", "https://thronebet.com", ["multi", "v2", "api"]),
@@ -334,7 +349,6 @@ PLAYWRIGHT_SITES = [
 
 PLAYWRIGHT_BOOKMAKERS = {bm: None for bm, _, _ in PLAYWRIGHT_SITES}
 
-# MASTER MAP FOR FASTAPI ROUTER & APPLICATION SCANNER
 BOOKMAKER_MAP = {
     **FAST_API_BOOKMAKERS,
     **ONEX_ENGINE_BOOKMAKERS,
