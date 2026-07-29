@@ -41,7 +41,7 @@ def validate_match(match: Dict[str, Any]) -> bool:
 
 
 # -------------------------------------------------------------------
-# BOOKMAKER REGISTRY
+# BOOKMAKER REGISTRY (33 SITES CONFIGURATION)
 # -------------------------------------------------------------------
 
 BOOKMAKER_REGISTRY = {
@@ -62,7 +62,7 @@ BOOKMAKER_REGISTRY = {
     "melbet": {"platform": "playwright_spa", "url": "https://melbet.co.tz/en/line/football", "keywords": ["get1x2", "compresszip", "linefeed", "sports"], "parser": "1xcorp"},
     "1xbit": {"platform": "playwright_spa", "url": "https://1xbit.com/en/line/football", "keywords": ["get1x2", "compresszip", "linefeed", "sports"], "parser": "1xcorp"},
     
-    "parimatch": {"platform": "playwright_spa", "url": "https://parimatch.co.tz/en/football", "keywords": ["prematch", "sports", "events", "v1", "line", "apg", "sportsbook"], "parser": "generic"},
+    "parimatch": {"platform": "playwright_spa", "url": "https://parimatch.co.tz/en/football", "keywords": ["prematch", "events", "apg", "sportsbook", "line"], "parser": "generic"},
     "betway": {"platform": "playwright_spa", "url": "https://www.betway.co.tz/sport/soccer", "keywords": ["highlights", "betbook", "sportsapi", "event", "soccer"], "parser": "generic"},
     "sokabet": {"platform": "playwright_spa", "url": "https://sokabet.co.tz", "keywords": ["gettopevents", "events", "sportsbook", "gettop"], "parser": "generic"},
     "888bet": {"platform": "playwright_spa", "url": "https://888bet.tz/en/sports/football", "keywords": ["sportsbook", "league-card", "highlights", "api", "events"], "parser": "generic"},
@@ -125,7 +125,7 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
                         "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
                     })
 
-        # 2. LEONBET (UPDATED EXACT SCHEMA FOR COMPETITORS & MARKETS)
+        # 2. LEONBET
         elif parser_type == "leonbet":
             events = payload.get("events", []) if isinstance(payload, dict) else []
             for item in events:
@@ -139,20 +139,18 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
                         elif ha == "AWAY" or (not away and competitors.index(comp) == 1):
                             away = comp.get("name")
 
-                    if not home:
-                        home = item.get("homeTeam", {}).get("name") or item.get("home")
-                    if not away:
-                        away = item.get("awayTeam", {}).get("name") or item.get("away")
+                    if not home: home = item.get("homeTeam", {}).get("name") or item.get("home")
+                    if not away: away = item.get("awayTeam", {}).get("name") or item.get("away")
 
                     o1, oX, o2 = 1.0, 1.0, 1.0
 
                     for market in item.get("markets", []):
-                        m_type = str(market.get("type", "")).upper()
                         m_name = str(market.get("name", "")).upper()
+                        m_type = str(market.get("type", "")).upper()
                         if "1X2" in m_name or "WINNER" in m_name or "1X2" in m_type:
                             for runner in market.get("runners", []):
                                 tags = [str(t).upper() for t in runner.get("tags", [])]
-                                r_type = str(runner.get("type") or runner.get("name")).upper()
+                                r_type = str(runner.get("type") or runner.get("name", "")).upper()
                                 price = safe_float(runner.get("price") or runner.get("odd"))
 
                                 if "HOME" in tags or r_type in ["1", "HOME"] or "1" in r_type:
@@ -326,18 +324,19 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
             async def handle_response(response):
                 if response.status == 200:
                     res_url = response.url.lower()
-                    if any(kw in res_url for kw in keywords):
-                        try:
-                            json_data = await response.json()
-                            captured_payloads.append((response.url, json_data))
-                        except Exception:
-                            pass
+                    # Skip growthbook/feature flags/analytics noise
+                    if "growthbook" not in res_url and "features" not in res_url and "analytics" not in res_url:
+                        if any(kw in res_url for kw in keywords):
+                            try:
+                                json_data = await response.json()
+                                captured_payloads.append((response.url, json_data))
+                            except Exception:
+                                pass
 
             page.on("response", handle_response)
             logger.info(f"[{bm_label}-INTERCEPTOR] Navigating to {url}...")
             
-            # Use 'commit' to begin network capture immediately as soon as headers arrive
-            await page.goto(url, wait_until="commit", timeout=28000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=25000)
             try:
                 await page.evaluate("window.scrollBy(0, 500)")
             except Exception:
