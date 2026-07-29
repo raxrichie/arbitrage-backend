@@ -50,7 +50,7 @@ BOOKMAKER_REGISTRY = {
     },
     "sportpesa": {
         "platform": "public_rest",
-        "url": "https://www.sportpesa.co.tz/api/upcoming/games?sportId=1",
+        "url": "https://www.sportpesa.co.tz/api/games/highlights?sportId=1&version=v2",
         "parser": "sportpesa",
     },
     "leonbet": {
@@ -60,18 +60,23 @@ BOOKMAKER_REGISTRY = {
     },
     "premierbet": {
         "platform": "public_rest",
-        "url": "https://sports-api.premierbet.co.tz/v1/events/highlights?country=TZ&group=g2&platform=desktop&locale=sw&sportId=1&limit=20",
-        "parser": "generic",
+        "url": "https://sports-api.premierbet.co.tz/v1/events/highlights?country=TZ&group=g2&platform=desktop&locale=sw&sportId=1&limit=50",
+        "parser": "premierbet",
+    },
+    "meridianbet": {
+        "platform": "public_rest",
+        "url": "https://online.meridianbet.co.tz/betsapi/v2/events/v2/sports/1/standard?type=today",
+        "parser": "meridianbet",
     },
 
-    # Tier 2: Shared 1XCorp Engine Platform Clones
-    "1xbet": {"platform": "1xcorp", "url": "https://1xbet.tz/service-api/main-line-feed/v1/desktop/sports/1", "parser": "1xcorp"},
-    "22bet": {"platform": "1xcorp", "url": "https://22bet.co.tz/service-api/main-line-feed/v1/desktop/sports/1", "parser": "1xcorp"},
-    "helabet": {"platform": "1xcorp", "url": "https://helabet.co.tz/service-api/main-line-feed/v1/desktop/sports/1", "parser": "1xcorp"},
-    "betwinner": {"platform": "1xcorp", "url": "https://betwinner.co.tz/service-api/main-line-feed/v1/desktop/sports/1", "parser": "1xcorp"},
-    "melbet": {"platform": "1xcorp", "url": "https://melbet.co.tz/service-api/main-line-feed/v1/desktop/sports/1", "parser": "1xcorp"},
-    "megapari": {"platform": "1xcorp", "url": "https://megapari.co.tz/service-api/main-line-feed/v1/desktop/sports/1", "parser": "1xcorp"},
-    "1xbit": {"platform": "1xcorp", "url": "https://1xbit.com/service-api/main-line-feed/v1/desktop/sports/1", "parser": "1xcorp"},
+    # Tier 2: Shared 1XCorp Engine Platform Clones (Pre-Compressed Direct Zip/JSON Feed)
+    "1xbet": {"platform": "1xcorp", "url": "https://1xbet.tz/LineFeed/Get1x2_CompressZip?sports=1&count=100&lng=en&mode=4", "parser": "1xcorp"},
+    "22bet": {"platform": "1xcorp", "url": "https://22bet.co.tz/LineFeed/Get1x2_CompressZip?sports=1&count=100&lng=en&mode=4", "parser": "1xcorp"},
+    "helabet": {"platform": "1xcorp", "url": "https://helabet.co.tz/LineFeed/Get1x2_CompressZip?sports=1&count=100&lng=en&mode=4", "parser": "1xcorp"},
+    "betwinner": {"platform": "1xcorp", "url": "https://betwinner.co.tz/LineFeed/Get1x2_CompressZip?sports=1&count=100&lng=en&mode=4", "parser": "1xcorp"},
+    "melbet": {"platform": "1xcorp", "url": "https://melbet.co.tz/LineFeed/Get1x2_CompressZip?sports=1&count=100&lng=en&mode=4", "parser": "1xcorp"},
+    "megapari": {"platform": "1xcorp", "url": "https://megapari.co.tz/LineFeed/Get1x2_CompressZip?sports=1&count=100&lng=en&mode=4", "parser": "1xcorp"},
+    "1xbit": {"platform": "1xcorp", "url": "https://1xbit.com/LineFeed/Get1x2_CompressZip?sports=1&count=100&lng=en&mode=4", "parser": "1xcorp"},
 
     # Tier 3: Anti-Bot Protected SPA Platforms (Playwright Network Interceptors)
     "parimatch": {
@@ -84,12 +89,6 @@ BOOKMAKER_REGISTRY = {
         "platform": "playwright_spa",
         "url": "https://www.betway.co.tz/sport/soccer",
         "keywords": ["highlights", "betbook", "sportsapi", "event"],
-        "parser": "generic",
-    },
-    "meridianbet": {
-        "platform": "playwright_spa",
-        "url": "https://meridianbet.co.tz/en/betting/football",
-        "keywords": ["events", "highlights", "api", "v1"],
         "parser": "generic",
     },
     "sokabet": {
@@ -134,11 +133,10 @@ BOOKMAKER_MAP = {bm: None for bm in BOOKMAKER_REGISTRY.keys()}
 
 
 # -------------------------------------------------------------------
-# AUTOMATIC PAYLOAD FINGERPRINTING & PARSER DISPATCHER
+# PAYLOAD FINGERPRINTING & PARSER DISPATCHER
 # -------------------------------------------------------------------
 
 def auto_detect_parser(payload: Any) -> str:
-    """Fingerprints JSON signature keys to determine the appropriate parser."""
     if isinstance(payload, dict):
         if "Value" in payload or ("O1" in str(payload) and "LE" in str(payload)):
             return "1xcorp"
@@ -150,24 +148,24 @@ def auto_detect_parser(payload: Any) -> str:
             return "bangbet"
         if "events" in payload and "runners" in str(payload):
             return "leonbet"
+        if "games" in str(payload) and "leagueName" in str(payload):
+            return "meridianbet"
     return "generic"
 
 
 def parse_raw_payload(bookmaker_id: str, payload: Any) -> List[Dict[str, Any]]:
-    """Decoupled Parser Stage: Selects parser via fingerprinting or registry default."""
     matches = []
     ts = int(time.time())
 
     config = BOOKMAKER_REGISTRY.get(bookmaker_id, {})
     parser_type = config.get("parser")
 
-    # Override with automatic payload fingerprinting
     detected = auto_detect_parser(payload)
     if detected != "generic":
         parser_type = detected
 
     try:
-        # 1. BETIKA PARSER
+        # 1. BETIKA
         if parser_type == "betika":
             events = payload.get("data", []) if isinstance(payload, dict) else (payload if isinstance(payload, list) else [])
             for item in events:
@@ -188,7 +186,37 @@ def parse_raw_payload(bookmaker_id: str, payload: Any) -> List[Dict[str, Any]]:
                         })
             return matches
 
-        # 2. SHARED 1XCORP PARSER
+        # 2. MERIDIANBET
+        if parser_type == "meridianbet":
+            events = payload.get("events", []) if isinstance(payload, dict) else (payload if isinstance(payload, list) else [])
+            for item in events:
+                if isinstance(item, dict):
+                    home = item.get("homeTeamName") or (item.get("teams", [{}])[0].get("name") if item.get("teams") else None)
+                    away = item.get("awayTeamName") or (item.get("teams", [{}, {}])[1].get("name") if len(item.get("teams", [])) > 1 else None)
+                    o1, oX, o2 = 1.0, 1.0, 1.0
+                    for game in item.get("games", []):
+                        for m in game.get("markets", []):
+                            code = str(m.get("code") or m.get("name"))
+                            price = safe_float(m.get("price") or m.get("odds"))
+                            if code == "1": o1 = price
+                            elif code == "X": oX = price
+                            elif code == "2": o2 = price
+
+                    if home and away:
+                        matches.append({
+                            "match_id": str(item.get("id") or item.get("eventId") or ""),
+                            "home_team": str(home),
+                            "away_team": str(away),
+                            "competition": str(item.get("leagueName") or "Soccer"),
+                            "home_odds": o1,
+                            "draw_odds": oX,
+                            "away_odds": o2,
+                            "bookmaker_id": bookmaker_id,
+                            "timestamp": ts,
+                        })
+            return matches
+
+        # 3. SHARED 1XCORP PARSER
         if parser_type == "1xcorp":
             events = payload.get("Value", []) if isinstance(payload, dict) else []
             for item in events:
@@ -216,7 +244,7 @@ def parse_raw_payload(bookmaker_id: str, payload: Any) -> List[Dict[str, Any]]:
                         })
             return matches
 
-        # 3. SPORTYBET PARSER
+        # 4. SPORTYBET
         if parser_type == "sportybet":
             tournaments = payload.get("data", {}).get("tournaments", []) if isinstance(payload, dict) else []
             for tourney in tournaments:
@@ -246,7 +274,7 @@ def parse_raw_payload(bookmaker_id: str, payload: Any) -> List[Dict[str, Any]]:
                         })
             return matches
 
-        # 4. BANGBET PARSER
+        # 5. BANGBET
         if parser_type == "bangbet":
             groups = payload.get("data", {}).get("groupList", []) if isinstance(payload, dict) else []
             for group in groups:
@@ -276,7 +304,7 @@ def parse_raw_payload(bookmaker_id: str, payload: Any) -> List[Dict[str, Any]]:
                         })
             return matches
 
-        # 5. LEONBET PARSER
+        # 6. LEONBET
         if parser_type == "leonbet":
             events = payload.get("events", []) if isinstance(payload, dict) else []
             for item in events:
@@ -305,21 +333,20 @@ def parse_raw_payload(bookmaker_id: str, payload: Any) -> List[Dict[str, Any]]:
                         })
             return matches
 
-        # 6. SPORTPESA PARSER
+        # 7. SPORTPESA
         if parser_type == "sportpesa":
-            events = payload.get("data", []) if isinstance(payload, dict) else (payload if isinstance(payload, list) else [])
+            events = payload if isinstance(payload, list) else payload.get("data", [])
             for item in events:
                 if isinstance(item, dict):
                     home = item.get("homeTeam", {}).get("name") or item.get("homeTeam")
                     away = item.get("awayTeam", {}).get("name") or item.get("awayTeam")
                     o1, oX, o2 = 1.0, 1.0, 1.0
                     for market in item.get("markets", []):
-                        if market.get("name") == "1X2":
-                            for selection in market.get("selections", []):
-                                sel_name = str(selection.get("name"))
-                                if sel_name in ["1", "Home"]: o1 = safe_float(selection.get("odds"))
-                                elif sel_name in ["X", "Draw"]: oX = safe_float(selection.get("odds"))
-                                elif sel_name in ["2", "Away"]: o2 = safe_float(selection.get("odds"))
+                        for selection in market.get("selections", []):
+                            sel_name = str(selection.get("name"))
+                            if sel_name in ["1", "Home"]: o1 = safe_float(selection.get("odds"))
+                            elif sel_name in ["X", "Draw"]: oX = safe_float(selection.get("odds"))
+                            elif sel_name in ["2", "Away"]: o2 = safe_float(selection.get("odds"))
 
                     if home and away:
                         matches.append({
@@ -335,7 +362,37 @@ def parse_raw_payload(bookmaker_id: str, payload: Any) -> List[Dict[str, Any]]:
                         })
             return matches
 
-        # 7. GENERIC FALLBACK PARSER
+        # 8. PREMIERBET
+        if parser_type == "premierbet":
+            events = payload if isinstance(payload, list) else (payload.get("events") or payload.get("data") or [])
+            for item in events:
+                if isinstance(item, dict):
+                    home = item.get("homeTeam") or item.get("home_team")
+                    away = item.get("awayTeam") or item.get("away_team")
+                    o1, oX, o2 = 1.0, 1.0, 1.0
+                    for market in item.get("markets", []):
+                        for selection in market.get("selections", []):
+                            name = str(selection.get("name"))
+                            price = safe_float(selection.get("price") or selection.get("odds"))
+                            if name in ["1", "Home"]: o1 = price
+                            elif name in ["X", "Draw"]: oX = price
+                            elif name in ["2", "Away"]: o2 = price
+
+                    if home and away:
+                        matches.append({
+                            "match_id": str(item.get("id") or ""),
+                            "home_team": str(home),
+                            "away_team": str(away),
+                            "competition": str(item.get("tournament") or "Soccer"),
+                            "home_odds": o1,
+                            "draw_odds": oX,
+                            "away_odds": o2,
+                            "bookmaker_id": bookmaker_id,
+                            "timestamp": ts,
+                        })
+            return matches
+
+        # 9. GENERIC FALLBACK
         events = payload if isinstance(payload, list) else (payload.get("data") or payload.get("events") or payload.get("matches") or payload.get("items") or [payload] if isinstance(payload, dict) else [])
         for item in events:
             if isinstance(item, dict):
@@ -370,7 +427,6 @@ def parse_raw_payload(bookmaker_id: str, payload: Any) -> List[Dict[str, Any]]:
 # -------------------------------------------------------------------
 
 async def fetch_http_api(client: httpx.AsyncClient, bookmaker_id: str, config: dict) -> List[Dict[str, Any]]:
-    """Direct HTTP REST Fetcher."""
     url = config["url"]
     try:
         response = await client.get(url, headers=REAL_BROWSER_HEADERS, timeout=CUSTOM_TIMEOUT)
@@ -390,7 +446,6 @@ async def fetch_http_api(client: httpx.AsyncClient, bookmaker_id: str, config: d
 
 
 async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: dict, wait_time: int = 6) -> List[Dict[str, Any]]:
-    """Playwright Network Response Interceptor."""
     url = config["url"]
     keywords = config.get("keywords", [])
     bm_label = bookmaker_id.upper()
