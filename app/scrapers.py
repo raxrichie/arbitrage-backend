@@ -89,7 +89,7 @@ def auto_detect_parser(payload: Any) -> str:
             return "sportybet"
         if "groupList" in payload.get("data", {}):
             return "bangbet"
-        if "events" in payload and ("runners" in str(payload) or "markets" in str(payload)):
+        if "events" in payload and ("competitors" in str(payload) or "runners" in str(payload)):
             return "leonbet"
         if "games" in str(payload) and "leagueName" in str(payload):
             return "meridianbet"
@@ -125,40 +125,53 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
                         "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
                     })
 
-        # 2. LEONBET
+        # 2. LEONBET (UPDATED EXACT SCHEMA FOR COMPETITORS & MARKETS)
         elif parser_type == "leonbet":
             events = payload.get("events", []) if isinstance(payload, dict) else []
-            if not events and isinstance(payload, dict):
-                events = payload.get("data", {}).get("events", []) or payload.get("items", [])
             for item in events:
                 if isinstance(item, dict):
-                    home = item.get("homeTeam", {}).get("name") or item.get("home")
-                    away = item.get("awayTeam", {}).get("name") or item.get("away")
+                    home, away = None, None
+                    competitors = item.get("competitors", [])
+                    for comp in competitors:
+                        ha = comp.get("homeAway")
+                        if ha == "HOME" or (not home and competitors.index(comp) == 0):
+                            home = comp.get("name")
+                        elif ha == "AWAY" or (not away and competitors.index(comp) == 1):
+                            away = comp.get("name")
+
+                    if not home:
+                        home = item.get("homeTeam", {}).get("name") or item.get("home")
+                    if not away:
+                        away = item.get("awayTeam", {}).get("name") or item.get("away")
+
                     o1, oX, o2 = 1.0, 1.0, 1.0
 
-                    runners = item.get("runners", [])
-                    if not runners and item.get("markets"):
-                        for market in item.get("markets", []):
-                            if market.get("name") in ["1X2", "Match Winner", "Winner"]:
-                                runners = market.get("runners", [])
-                                break
+                    for market in item.get("markets", []):
+                        m_type = str(market.get("type", "")).upper()
+                        m_name = str(market.get("name", "")).upper()
+                        if "1X2" in m_name or "WINNER" in m_name or "1X2" in m_type:
+                            for runner in market.get("runners", []):
+                                tags = [str(t).upper() for t in runner.get("tags", [])]
+                                r_type = str(runner.get("type") or runner.get("name")).upper()
+                                price = safe_float(runner.get("price") or runner.get("odd"))
 
-                    for runner in runners:
-                        tags = runner.get("tags", [])
-                        price = runner.get("price") or runner.get("odd")
-                        r_type = str(runner.get("type") or runner.get("name"))
-                        if "HOME" in tags or r_type in ["1", "Home"]: o1 = safe_float(price)
-                        elif "DRAW" in tags or r_type in ["X", "Draw"]: oX = safe_float(price)
-                        elif "AWAY" in tags or r_type in ["2", "Away"]: o2 = safe_float(price)
+                                if "HOME" in tags or r_type in ["1", "HOME"] or "1" in r_type:
+                                    o1 = price
+                                elif "DRAW" in tags or r_type in ["X", "DRAW"] or "DRAW" in r_type:
+                                    oX = price
+                                elif "AWAY" in tags or r_type in ["2", "AWAY"] or "2" in r_type:
+                                    o2 = price
 
-                    raw_parsed.append({
-                        "match_id": str(item.get("id") or ""),
-                        "home_team": str(home or ""), "away_team": str(away or ""),
-                        "competition": str(item.get("league", {}).get("name") or "Soccer"),
-                        "home_odds": o1, "draw_odds": oX, "away_odds": o2,
-                        "sport": "soccer", "market_type": "1X2",
-                        "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
-                    })
+                    if home and away:
+                        raw_parsed.append({
+                            "match_id": str(item.get("id") or ""),
+                            "home_team": str(home),
+                            "away_team": str(away),
+                            "competition": str(item.get("league", {}).get("name") or item.get("family", {}).get("name") or "Soccer"),
+                            "home_odds": o1, "draw_odds": oX, "away_odds": o2,
+                            "sport": "soccer", "market_type": "1X2",
+                            "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
+                        })
 
         # 3. SPORTYBET
         elif parser_type == "sportybet":
@@ -254,17 +267,16 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
                         "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
                     })
 
-        # APPLY STRICT VALIDATOR
         matches = [m for m in raw_parsed if validate_match(m)]
 
-        # --- DIAGNOSTIC PAYLOAD DUMP ON 0 PARSED MATCHES ---
         if len(matches) == 0:
+            bm_label = str(bookmaker_id).upper()
             if isinstance(payload, dict):
                 top_keys = list(payload.keys())[:10]
                 sample_str = json.dumps(payload)[:300]
-                logger.warning(f"[{bookmaker_id.upper()}-SCHEMA-MISMATCH] Top keys: {top_keys} | Sample: {sample_str}")
+                logger.warning(f"[{bm_label}-SCHEMA-MISMATCH] Top keys: {top_keys} | Sample: {sample_str}")
             elif isinstance(payload, list):
-                logger.warning(f"[{bookmaker_id.upper()}-SCHEMA-MISMATCH] Returned List length: {len(payload)}")
+                logger.warning(f"[{bm_label}-SCHEMA-MISMATCH] Returned List length: {len(payload)}")
 
     except Exception as e:
         logger.error(f"[{bookmaker_id}] Parser Exception ({type(e).__name__}): {repr(e)}")
@@ -324,7 +336,8 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
             page.on("response", handle_response)
             logger.info(f"[{bm_label}-INTERCEPTOR] Navigating to {url}...")
             
-            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            # Use 'commit' to begin network capture immediately as soon as headers arrive
+            await page.goto(url, wait_until="commit", timeout=28000)
             try:
                 await page.evaluate("window.scrollBy(0, 500)")
             except Exception:
@@ -356,7 +369,7 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
 async def scrape_all_sportsbooks() -> List[Dict[str, Any]]:
     all_matches = []
 
-    # 1. Parallel HTTP Scrapers (Managed by HTTP_SEMAPHORE)
+    # 1. Parallel HTTP Scrapers
     http_targets = {bm: cfg for bm, cfg in BOOKMAKER_REGISTRY.items() if cfg["platform"] in ["public_rest"]}
     
     async with httpx.AsyncClient(timeout=CUSTOM_TIMEOUT, follow_redirects=True) as client:
@@ -366,7 +379,7 @@ async def scrape_all_sportsbooks() -> List[Dict[str, Any]]:
             if isinstance(res, list):
                 all_matches.extend(res)
 
-    # 2. Concurrent Playwright Workers (Managed by PLAYWRIGHT_SEMAPHORE)
+    # 2. Concurrent Playwright Workers
     playwright_targets = {bm: cfg for bm, cfg in BOOKMAKER_REGISTRY.items() if cfg["platform"] == "playwright_spa"}
 
     try:
