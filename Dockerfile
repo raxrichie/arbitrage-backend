@@ -13,6 +13,9 @@ COPY requirements.txt .
 # Install Python application dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Ensure Playwright browsers & dependencies are installed
+RUN playwright install --with-deps
+
 # Download patchright's stealth Chromium browser binary
 RUN python3 -m patchright install chromium
 
