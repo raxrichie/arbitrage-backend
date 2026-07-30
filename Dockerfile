@@ -14,7 +14,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN playwright install --with-deps chromium
 
 # Install stealth Chromium via patchright
-RUN python3 -m patchright install chromium
+RUN python3 -m patchright
 
 # Copy rest of application code
 COPY . .
