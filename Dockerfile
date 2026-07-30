@@ -13,6 +13,9 @@ COPY requirements.txt .
 # Install Python application dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Download patchright's patched Chromium browser binary
+RUN patchright install chromium
+
 # Copy rest of application code
 COPY . .
 
