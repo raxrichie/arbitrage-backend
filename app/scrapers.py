@@ -130,6 +130,100 @@ def find_events_recursive(obj: Any, depth: int = 0) -> List[Dict[str, Any]]:
 
 
 # -------------------------------------------------------------------
+# ARBITRAGE CALCULATION ENGINE (2-WAY & 3-WAY SPORTS)
+# -------------------------------------------------------------------
+
+def find_arbitrage_opportunities(all_matches: List[Dict[str, Any]], total_stake: float = 10000.0) -> List[Dict[str, Any]]:
+    """
+    Cross-checks odds for identical teams across bookmakers to find 2-way and 3-way surebets.
+    Calculates exact stake distribution and guaranteed profit margin %.
+    """
+    grouped_events: Dict[str, List[Dict[str, Any]]] = {}
+    
+    # Group matches by normalized team pair key
+    for m in all_matches:
+        home_clean = "".join(e for e in m["home_team"].lower() if e.isalnum())
+        away_clean = "".join(e for e in m["away_team"].lower() if e.isalnum())
+        key = f"{m['sport']}_{home_clean[:8]}_{away_clean[:8]}"
+        grouped_events.setdefault(key, []).append(m)
+
+    arbs = []
+
+    for key, matches in grouped_events.items():
+        if len(matches) < 2:
+            continue
+
+        sport = matches[0]["sport"]
+        home_name = matches[0]["home_team"]
+        away_name = matches[0]["away_team"]
+
+        # Find best available odds across all sportsbooks
+        best_home = max(matches, key=lambda x: x.get("home_odds") or 0)
+        best_away = max(matches, key=lambda x: x.get("away_odds") or 0)
+
+        o1 = best_home.get("home_odds")
+        o2 = best_away.get("away_odds")
+
+        if not o1 or not o2:
+            continue
+
+        # 1. 2-Way Sports Arbitrage (Tennis, Basketball, MMA)
+        if sport in ["tennis", "basketball", "volleyball", "mma", "table_tennis"]:
+            arb_margin = (1.0 / o1) + (1.0 / o2)
+            if arb_margin < 1.0:  # Arbitrage exists!
+                profit_pct = (1.0 - arb_margin) * 100
+                stake_1 = round((total_stake / (o1 * arb_margin)), 2)
+                stake_2 = round((total_stake / (o2 * arb_margin)), 2)
+                guaranteed_payout = round(stake_1 * o1, 2)
+                
+                arbs.append({
+                    "sport": sport,
+                    "event": f"{home_name} vs {away_name}",
+                    "type": "2-Way",
+                    "profit_margin_pct": round(profit_pct, 2),
+                    "guaranteed_payout": guaranteed_payout,
+                    "legs": [
+                        {"outcome": "Home (1)", "bookmaker": best_home["bookmaker_id"], "odds": o1, "stake": stake_1},
+                        {"outcome": "Away (2)", "bookmaker": best_away["bookmaker_id"], "odds": o2, "stake": stake_2},
+                    ]
+                })
+
+        # 2. 3-Way Sports Arbitrage (Soccer 1X2)
+        else:
+            best_draw = max([m for m in matches if m.get("draw_odds") is not None], key=lambda x: x.get("draw_odds") or 0, default=None)
+            if not best_draw:
+                continue
+
+            oX = best_draw.get("draw_odds")
+            if not oX:
+                continue
+
+            arb_margin = (1.0 / o1) + (1.0 / oX) + (1.0 / o2)
+            if arb_margin < 1.0:  # Arbitrage exists!
+                profit_pct = (1.0 - arb_margin) * 100
+                stake_1 = round((total_stake / (o1 * arb_margin)), 2)
+                stake_X = round((total_stake / (oX * arb_margin)), 2)
+                stake_2 = round((total_stake / (o2 * arb_margin)), 2)
+                guaranteed_payout = round(stake_1 * o1, 2)
+
+                arbs.append({
+                    "sport": sport,
+                    "event": f"{home_name} vs {away_name}",
+                    "type": "3-Way 1X2",
+                    "profit_margin_pct": round(profit_pct, 2),
+                    "guaranteed_payout": guaranteed_payout,
+                    "legs": [
+                        {"outcome": "Home (1)", "bookmaker": best_home["bookmaker_id"], "odds": o1, "stake": stake_1},
+                        {"outcome": "Draw (X)", "bookmaker": best_draw["bookmaker_id"], "odds": oX, "stake": stake_X},
+                        {"outcome": "Away (2)", "bookmaker": best_away["bookmaker_id"], "odds": o2, "stake": stake_2},
+                    ]
+                })
+
+    arbs.sort(key=lambda x: x["profit_margin_pct"], reverse=True)
+    return arbs
+
+
+# -------------------------------------------------------------------
 # BOOKMAKER REGISTRY
 # -------------------------------------------------------------------
 
@@ -142,13 +236,13 @@ BOOKMAKER_REGISTRY = {
     "leonbet": {"platform": "public_rest", "url": "https://leonbet.co.tz/api-2/betline/events/all?ctag=en-US", "parser": "leonbet"},
     "premierbet": {"platform": "public_rest", "url": "https://sports-api.premierbet.co.tz/v1/events/highlights?country=TZ&group=g2&platform=desktop&locale=en&sportId=1&limit=50", "parser": "premierbet"},
 
-    # 1XCorp Direct Fast REST Endpoints (Bypasses Browser Captures)
-    "1xbet": {"platform": "public_rest", "url": "https://1xbet.co.tz/LineFeed/Get1x2_VZip?sports=1&count=50&lng=en&mode=4", "parser": "1xcorp"},
-    "22bet": {"platform": "public_rest", "url": "https://22bet.co.tz/LineFeed/Get1x2_VZip?sports=1&count=50&lng=en&mode=4", "parser": "1xcorp"},
-    "helabet": {"platform": "public_rest", "url": "https://helabet.co.tz/LineFeed/Get1x2_VZip?sports=1&count=50&lng=en&mode=4", "parser": "1xcorp"},
-    "betwinner": {"platform": "public_rest", "url": "https://betwinner.co.tz/LineFeed/Get1x2_VZip?sports=1&count=50&lng=en&mode=4", "parser": "1xcorp"},
-    "melbet": {"platform": "public_rest", "url": "https://melbet.co.tz/LineFeed/Get1x2_VZip?sports=1&count=50&lng=en&mode=4", "parser": "1xcorp"},
-    "1xbit": {"platform": "public_rest", "url": "https://1xbit.com/LineFeed/Get1x2_VZip?sports=1&count=50&lng=en&mode=4", "parser": "1xcorp"},
+    # 1XCorp Direct Fast REST Endpoints
+    "1xbet": {"platform": "public_rest", "url": "https://1xbet.co.tz/LineFeed/Get1x2_VZip?sports=1&count=50&lng=en&mode=4&country=190&getEmpty=true", "parser": "1xcorp"},
+    "22bet": {"platform": "public_rest", "url": "https://22bet.co.tz/LineFeed/Get1x2_VZip?sports=1&count=50&lng=en&mode=4&country=190&getEmpty=true", "parser": "1xcorp"},
+    "helabet": {"platform": "public_rest", "url": "https://helabet.co.tz/LineFeed/Get1x2_VZip?sports=1&count=50&lng=en&mode=4&country=190&getEmpty=true", "parser": "1xcorp"},
+    "betwinner": {"platform": "public_rest", "url": "https://betwinner.co.tz/LineFeed/Get1x2_VZip?sports=1&count=50&lng=en&mode=4&country=190&getEmpty=true", "parser": "1xcorp"},
+    "melbet": {"platform": "public_rest", "url": "https://melbet.co.tz/LineFeed/Get1x2_VZip?sports=1&count=50&lng=en&mode=4&country=190&getEmpty=true", "parser": "1xcorp"},
+    "1xbit": {"platform": "public_rest", "url": "https://1xbit.com/LineFeed/Get1x2_VZip?sports=1&count=50&lng=en&mode=4&country=190&getEmpty=true", "parser": "1xcorp"},
 
     # Playwright Targets
     "galsport": {"platform": "playwright_spa", "url": "https://gsb.co.tz/en/sportsbook/highlights", "keywords": ["/api/", "highlights", "events"], "parser": "generic"},
@@ -199,7 +293,7 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
                     home = extract_team_name(item.get("O1") or item.get("HT") or item.get("HomeTeam"))
                     away = extract_team_name(item.get("O2") or item.get("AT") or item.get("AwayTeam"))
                     
-                    raw_sport_id = item.get("SI") or item.get("SportId") or item.get("SN")
+                    raw_sport_id = item.get("SI") or item.get("SportId") or item.get("SN") or item.get("Sport")
                     detected_sport = resolve_sport_name(raw_sport_id)
                     competition = str(item.get("LE") or item.get("League") or "Unknown")
 
@@ -467,7 +561,7 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
 
 
 # -------------------------------------------------------------------
-# HARDENED HTTP FETCHER
+# HARDENED HTTP FETCHER (ALLOWING HTTP 203 FOR 1XCORP CLONES)
 # -------------------------------------------------------------------
 
 async def fetch_http_api(session: AsyncSession, bookmaker_id: str, config: dict, retries: int = 3) -> List[Dict[str, Any]]:
@@ -479,7 +573,7 @@ async def fetch_http_api(session: AsyncSession, bookmaker_id: str, config: dict,
             try:
                 if bookmaker_id == "sportpesa":
                     res_init = await session.get(url, headers=headers, impersonate="chrome", timeout=10)
-                    if res_init.status_code == 200:
+                    if res_init.status_code in [200, 203]:
                         try:
                             data_init = res_init.json()
                             games_list = data_init if isinstance(data_init, list) else (data_init.get("data") or data_init.get("games") or data_init.get("items") or [])
@@ -488,24 +582,25 @@ async def fetch_http_api(session: AsyncSession, bookmaker_id: str, config: dict,
                             if game_ids:
                                 markets_url = f"https://www.sportpesa.co.tz/api/games/markets?games={','.join(game_ids)}&markets=10"
                                 res_markets = await session.get(markets_url, headers=headers, impersonate="chrome", timeout=10)
-                                if res_markets.status_code == 200:
+                                if res_markets.status_code in [200, 203]:
                                     return parse_raw_payload(bookmaker_id, res_markets.json())
                                 else:
-                                    logger.warning(f"[SPORTPESA] Markets endpoint status {res_markets.status_code} (Attempt {attempt+1}/{retries})")
+                                    logger.warning(f"[SPORTPESA] Markets status {res_markets.status_code} (Attempt {attempt+1}/{retries})")
                             else:
-                                logger.warning(f"[SPORTPESA] No game IDs found in payload structure (Attempt {attempt+1}/{retries})")
+                                logger.warning(f"[SPORTPESA] No game IDs found in payload (Attempt {attempt+1}/{retries})")
                         except Exception as parse_err:
                             logger.warning(f"[SPORTPESA] JSON parse error: {parse_err} (Attempt {attempt+1}/{retries})")
                     else:
                         logger.warning(f"[SPORTPESA] Highlights status {res_init.status_code} (Attempt {attempt+1}/{retries})")
                 else:
                     res = await session.get(url, headers=headers, impersonate="chrome", timeout=10)
-                    if res.status_code == 200:
+                    # Support HTTP 203 (1XCorp Cloudflare cache response)
+                    if res.status_code in [200, 203]:
                         try:
                             return parse_raw_payload(bookmaker_id, res.json())
                         except Exception:
                             preview = res.text[:200].replace("\n", " ")
-                            logger.warning(f"[{bookmaker_id}] Non-JSON 200 response: {preview} (Attempt {attempt+1}/{retries})")
+                            logger.warning(f"[{bookmaker_id}] Non-JSON body on HTTP {res.status_code}: {preview} (Attempt {attempt+1}/{retries})")
                     else:
                         logger.warning(f"[{bookmaker_id}] HTTP Status {res.status_code} (Attempt {attempt+1}/{retries})")
             except Exception as e:
@@ -568,7 +663,7 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
             await page.route("**/*", block_unnecessary_resources)
 
             async def handle_response(response):
-                if response.status == 200:
+                if response.status in [200, 203]:
                     res_url = response.url.lower()
 
                     if "growthbook" not in res_url and "features" not in res_url and "analytics" not in res_url:
@@ -644,10 +739,10 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
 
 
 # -------------------------------------------------------------------
-# DISPATCHER MASTER SCANNER LOOP
+# DISPATCHER MASTER SCANNER LOOP WITH ARBITRAGE DETECTOR
 # -------------------------------------------------------------------
 
-async def scrape_all_sportsbooks() -> List[Dict[str, Any]]:
+async def scrape_all_sportsbooks() -> Dict[str, Any]:
     all_matches = []
 
     # 1. Fast Parallel HTTP Scrapers
@@ -682,5 +777,18 @@ async def scrape_all_sportsbooks() -> List[Dict[str, Any]]:
     except Exception as e:
         logger.error(f"Playwright Execution Batch Error: {repr(e)}")
 
-    logger.info(f"=== SCAN COMPLETED: Total {len(all_matches)} valid match odds extracted across registered sportsbooks ===")
-    return all_matches
+    # 3. Calculate Arbitrage Opportunities across 2-way and 3-way markets
+    arbitrage_opportunities = find_arbitrage_opportunities(all_matches, total_stake=10000.0)
+
+    logger.info(f"=== SCAN COMPLETED: Total {len(all_matches)} matches extracted | Found {len(arbitrage_opportunities)} Surebet Arbitrage Opportunities ===")
+    
+    if arbitrage_opportunities:
+        for arb in arbitrage_opportunities[:5]:
+            logger.info(f"🔥 [ARBITRAGE FOUND] {arb['sport'].upper()} ({arb['type']}): {arb['event']} - Profit: {arb['profit_margin_pct']}% | Legs: {arb['legs']}")
+
+    return {
+        "matches_count": len(all_matches),
+        "arbitrage_opportunities_count": len(arbitrage_opportunities),
+        "arbitrage_opportunities": arbitrage_opportunities,
+        "matches": all_matches
+    }
