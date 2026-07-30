@@ -10,6 +10,9 @@ COPY requirements.txt .
 # Install Python dependencies (includes patchright from GitHub)
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Verify patchright is importable
+RUN python -c "import patchright; print('Patchright installed OK')"
+
 # Ensure Playwright browsers & dependencies are installed
 RUN playwright install --with-deps chromium
 
