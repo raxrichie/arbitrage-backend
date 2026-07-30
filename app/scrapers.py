@@ -565,8 +565,33 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
                 user_agent=REAL_BROWSER_HEADERS["User-Agent"],
                 locale="en-US",
                 timezone_id="Africa/Dar_es_Salaam",
-                viewport={"width": 1280, "height": 720}
+                viewport={"width": 1280, "height": 720},
+                extra_http_headers={
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Sec-Ch-Ua": REAL_BROWSER_HEADERS["Sec-Ch-Ua"],
+                    "Sec-Ch-Ua-Mobile": "?0",
+                    "Sec-Ch-Ua-Platform": REAL_BROWSER_HEADERS["Sec-Ch-Ua-Platform"],
+                },
             )
+
+            # Stealth init script: neutralize the most common automation
+            # fingerprints that anti-bot JS checks for before deciding whether
+            # to serve real data. Runs before any site JS on every new page.
+            await context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+                window.chrome = { runtime: {} };
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) => (
+                    parameters.name === 'notifications'
+                        ? Promise.resolve({ state: Notification.permission })
+                        : originalQuery(parameters)
+                );
+                Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+                Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+            """)
+
             page = await context.new_page()
 
             async def block_unnecessary_resources(route):
@@ -607,8 +632,24 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
 
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=10000)
+
+                # Give the SPA a chance to reach network idle (real odds XHRs
+                # usually fire during this window) before falling back to a
+                # fixed sleep. This is where domcontentloaded alone was letting
+                # us capture only early config/feature-flag calls.
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=6000)
+                except Exception:
+                    pass
+
+                # Simulate minimal human interaction — some SPAs only fire the
+                # real market feed after a scroll or viewport-intersection event.
+                await page.mouse.move(300, 400)
                 await page.evaluate("window.scrollBy(0, 500)")
-                # Multi-payload collector window: sleep 5 seconds to catch stacked market XHR responses
+                await asyncio.sleep(1.0)
+                await page.evaluate("window.scrollBy(0, 800)")
+
+                # Multi-payload collector window: sleep to catch stacked market XHR responses
                 await asyncio.sleep(5.0)
             except Exception:
                 logger.warning(f"[{bm_label}-INTERCEPTOR] Navigation timeout warning, processing captured payloads...")
