@@ -30,6 +30,7 @@ app.add_middleware(
 CACHE: Dict[str, Any] = {
     "last_updated": None,
     "matches": [],
+    "arbitrage_opportunities": [],
     "by_bookmaker": {bm: [] for bm in BOOKMAKER_MAP.keys()},
 }
 
@@ -41,28 +42,38 @@ async def background_radar_scan():
     """Background task to fetch live odds across all sportsbooks and update cache."""
     logger.info("Starting scheduled odds scan across all sportsbooks...")
     try:
-        all_matches = await scrape_all_sportsbooks()
-        
+        # Returns a dict: {"matches": [...], "arbitrage_opportunities": [...], ...}
+        scan_data = await scrape_all_sportsbooks()
+
+        # Safely extract list data
+        all_matches = scan_data.get("matches", []) if isinstance(scan_data, dict) else (scan_data if isinstance(scan_data, list) else [])
+        arb_ops = scan_data.get("arbitrage_opportunities", []) if isinstance(scan_data, dict) else []
+
         # Reset and populate bookmaker cache buckets
         by_bm = {bm: [] for bm in BOOKMAKER_MAP.keys()}
+        
         for m in all_matches:
-            bm_key = m.get("bookmaker", "").lower()
-            if bm_key in by_bm:
-                by_bm[bm_key].append(m)
+            if isinstance(m, dict):
+                # Look up "bookmaker_id" (matching scrapers.py schema) with fallback to "bookmaker"
+                bm_key = str(m.get("bookmaker_id") or m.get("bookmaker") or "").lower().strip()
+                if bm_key in by_bm:
+                    by_bm[bm_key].append(m)
 
         CACHE["matches"] = all_matches
+        CACHE["arbitrage_opportunities"] = arb_ops
         CACHE["by_bookmaker"] = by_bm
         CACHE["last_updated"] = datetime.now(timezone.utc).isoformat()
 
+        active_count = len([bm for bm, lst in by_bm.items() if len(lst) > 0])
         logger.info(
-            f"Scan complete. Updated cache with {len(all_matches)} total matches across "
-            f"{len([bm for bm, lst in by_bm.items() if len(lst) > 0])} active sportsbooks."
+            f"Scan complete. Updated cache with {len(all_matches)} total matches and "
+            f"{len(arb_ops)} surebets across {active_count} active sportsbooks."
         )
     except Exception as e:
-        logger.error(f"Error during background scan: {e}")
+        logger.error(f"Error during background scan: {repr(e)}")
 
 
-# Start initial scan on startup and schedule periodic updates
+# Start initial scan on startup
 @app.on_event("startup")
 async def on_startup():
     asyncio.create_task(background_radar_scan())
@@ -72,7 +83,6 @@ async def on_startup():
 # ROUTERS AND ENDPOINTS
 # -------------------------------------------------------------------
 
-# Silences Render Health Check 405 Warnings by adding @app.head("/")
 @app.get("/")
 @app.head("/")
 async def root():
@@ -81,6 +91,7 @@ async def root():
         "service": "Arbitrage Radar Backend",
         "timestamp": CACHE["last_updated"],
         "total_cached_events": len(CACHE["matches"]),
+        "total_surebets_found": len(CACHE["arbitrage_opportunities"]),
     }
 
 
@@ -89,18 +100,32 @@ v1_router = APIRouter(prefix="/v1")
 
 @v1_router.get("/arbitrage-radar")
 async def get_arbitrage_radar(background_tasks: BackgroundTasks):
-    """Returns total global events, individual site event counts (N), and all match opportunities."""
+    """Returns total global events, individual site event counts, and live surebets."""
     counts_by_site = {bm: len(lst) for bm, lst in CACHE["by_bookmaker"].items()}
 
-    # Trigger a refresh scan in the background if cache is empty or older than 2 minutes
+    # Trigger a refresh scan in the background
     background_tasks.add_task(background_radar_scan)
 
     return {
         "status": "success",
         "timestamp": CACHE["last_updated"],
         "total_events": len(CACHE["matches"]),
+        "total_surebets": len(CACHE["arbitrage_opportunities"]),
         "counts_by_bookmaker": counts_by_site,
+        "arbitrage_opportunities": CACHE["arbitrage_opportunities"],
         "opportunities": CACHE["matches"],
+    }
+
+
+@v1_router.get("/surebets")
+@v1_router.get("/arbitrage-opportunities")
+async def get_surebets():
+    """Returns only the high-value cross-bookmaker surebet opportunities with calculated stakes."""
+    return {
+        "status": "success",
+        "timestamp": CACHE["last_updated"],
+        "count": len(CACHE["arbitrage_opportunities"]),
+        "arbitrage_opportunities": CACHE["arbitrage_opportunities"],
     }
 
 
