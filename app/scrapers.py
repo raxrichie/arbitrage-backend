@@ -36,9 +36,17 @@ REAL_BROWSER_HEADERS = {
 SPORT_MAP = {
     "sr:sport:1": "soccer", "1": "soccer",
     "sr:sport:2": "basketball", "2": "basketball",
+    "sr:sport:3": "baseball", "3": "baseball",
+    "sr:sport:4": "ice_hockey", "4": "ice_hockey",
     "sr:sport:5": "tennis", "5": "tennis",
+    "sr:sport:6": "handball", "6": "handball",
+    "sr:sport:12": "rugby", "12": "rugby",
+    "sr:sport:20": "table_tennis", "20": "table_tennis",
+    "sr:sport:21": "cricket", "21": "cricket",
+    "sr:sport:22": "darts", "22": "darts",
     "sr:sport:23": "table_tennis", "23": "table_tennis",
     "sr:sport:31": "volleyball", "10": "volleyball",
+    "sr:sport:109": "esports",
     "sr:sport:117": "mma", "117": "mma",
 }
 
@@ -47,19 +55,34 @@ PLAYWRIGHT_SEMAPHORE = asyncio.Semaphore(2)
 
 
 def resolve_sport_name(raw_val: Any) -> str:
-    if not raw_val: return "soccer"
+    """Normalizes raw sport IDs, URIs, and string names into standardized sport keys."""
+    if not raw_val:
+        return "soccer"
     val_str = str(raw_val).strip().lower()
-    if val_str in SPORT_MAP: return SPORT_MAP[val_str]
-    if any(k in val_str for k in ["foot", "soccer", "football"]): return "soccer"
-    elif "basket" in val_str: return "basketball"
-    elif "tennis" in val_str and "table" not in val_str: return "tennis"
-    elif "table" in val_str or "ping" in val_str: return "table_tennis"
-    elif "volley" in val_str: return "volleyball"
-    elif any(k in val_str for k in ["mma", "ufc", "fighting"]): return "mma"
+    if val_str in SPORT_MAP:
+        return SPORT_MAP[val_str]
+    
+    if any(k in val_str for k in ["foot", "soccer", "football"]):
+        return "soccer"
+    elif "basket" in val_str:
+        return "basketball"
+    elif "tennis" in val_str and "table" not in val_str:
+        return "tennis"
+    elif "table" in val_str or "ping" in val_str:
+        return "table_tennis"
+    elif "volley" in val_str:
+        return "volleyball"
+    elif any(k in val_str for k in ["mma", "ufc", "fighting", "boxing"]):
+        return "mma"
+    elif "handball" in val_str:
+        return "handball"
+    elif "dart" in val_str:
+        return "darts"
     return val_str
 
 
 def get_dynamic_headers(target_url: str) -> Dict[str, str]:
+    """Generates site-specific headers. Strips api subdomains to resolve CORS blocks."""
     parsed = urlparse(target_url)
     clean_netloc = parsed.netloc.replace("api.", "www.").replace("bet-api.", "www.")
     origin = f"{parsed.scheme}://{clean_netloc}"
@@ -70,11 +93,13 @@ def get_dynamic_headers(target_url: str) -> Dict[str, str]:
 
 
 def safe_float(val: Any, default: Optional[float] = None) -> Optional[float]:
-    if val is None: return default
+    if val is None:
+        return default
     try:
         parsed = float(val)
         return parsed if parsed > 1.01 else default
-    except (ValueError, TypeError): return default
+    except (ValueError, TypeError):
+        return default
 
 
 def extract_team_name(val: Any) -> str:
@@ -84,6 +109,10 @@ def extract_team_name(val: Any) -> str:
 
 
 def validate_match(match: Dict[str, Any]) -> bool:
+    """Type-safe match validator supporting 2-way and 3-way markets."""
+    if not isinstance(match, dict):
+        return False
+
     home = extract_team_name(match.get("home_team", ""))
     away = extract_team_name(match.get("away_team", ""))
     if len(home) < 2 or len(away) < 2 or home.startswith("{") or away.startswith("{"):
@@ -96,14 +125,15 @@ def validate_match(match: Dict[str, Any]) -> bool:
     valid_odds = [o for o in [o1, oX, o2] if o is not None and o > 1.01]
     sport = resolve_sport_name(match.get("sport", "soccer"))
 
-    if sport in ["tennis", "basketball", "volleyball", "mma", "table_tennis"]:
+    if sport in ["tennis", "basketball", "volleyball", "mma", "table_tennis", "baseball", "darts", "handball"]:
         return len(valid_odds) >= 2
     else:
         return len(valid_odds) >= 2 and oX is not None
 
 
 def find_events_recursive(obj: Any, depth: int = 0) -> List[Dict[str, Any]]:
-    if depth > 4: return []
+    if depth > 4:
+        return []
     if isinstance(obj, list):
         if len(obj) > 0 and isinstance(obj[0], dict):
             sample = obj[0]
@@ -112,54 +142,67 @@ def find_events_recursive(obj: Any, depth: int = 0) -> List[Dict[str, Any]]:
         events = []
         for item in obj[:10]:
             found = find_events_recursive(item, depth + 1)
-            if found: events.extend(found)
+            if found:
+                events.extend(found)
         return events
     elif isinstance(obj, dict):
         for key in ["events", "matches", "games", "fixtures", "items", "groupList", "matchVoList", "data"]:
             if key in obj:
                 val = obj[key]
-                if isinstance(val, list): return val
+                if isinstance(val, list):
+                    return val
                 elif isinstance(val, dict):
                     found = find_events_recursive(val, depth + 1)
-                    if found: return found
+                    if found:
+                        return found
         for k, v in obj.items():
             if isinstance(v, (dict, list)):
                 found = find_events_recursive(v, depth + 1)
-                if found: return found
+                if found:
+                    return found
     return []
 
 
 # -------------------------------------------------------------------
-# ARBITRAGE CALCULATION ENGINE (2-WAY & 3-WAY SPORTS)
+# ACTIONABLE MULTI-SPORT ARBITRAGE CALCULATOR (HARDENED)
 # -------------------------------------------------------------------
 
-def find_arbitrage_opportunities(all_matches: List[Dict[str, Any]], total_stake: float = 10000.0) -> List[Dict[str, Any]]:
+def find_arbitrage_opportunities(all_matches: List[Dict[str, Any]], bankroll: float = 100000.0) -> List[Dict[str, Any]]:
     """
-    Cross-checks odds for identical teams across bookmakers to find 2-way and 3-way surebets.
-    Calculates exact stake distribution and guaranteed profit margin %.
+    Finds true cross-bookmaker surebets across 2-way and 3-way sports.
+    Calculates exact stake distributions (rounded to nearest 10 currency units)
+    and eliminates single-bookmaker or unrealistic outlier false positives.
     """
     grouped_events: Dict[str, List[Dict[str, Any]]] = {}
-    
-    # Group matches by normalized team pair key
+
     for m in all_matches:
-        home_clean = "".join(e for e in m["home_team"].lower() if e.isalnum())
-        away_clean = "".join(e for e in m["away_team"].lower() if e.isalnum())
-        key = f"{m['sport']}_{home_clean[:8]}_{away_clean[:8]}"
+        if not isinstance(m, dict):
+            continue
+        
+        home_clean = "".join(e for e in str(m.get("home_team", "")).lower() if e.isalnum())
+        away_clean = "".join(e for e in str(m.get("away_team", "")).lower() if e.isalnum())
+        if not home_clean or not away_clean:
+            continue
+            
+        key = f"{m.get('sport', 'soccer')}_{home_clean[:8]}_{away_clean[:8]}"
         grouped_events.setdefault(key, []).append(m)
 
-    arbs = []
+    opportunities = []
 
     for key, matches in grouped_events.items():
-        if len(matches) < 2:
+        # Type check and require at least 2 distinct sportsbooks
+        valid_matches = [m for m in matches if isinstance(m, dict)]
+        distinct_bookies = set(str(m.get("bookmaker_id")) for m in valid_matches if m.get("bookmaker_id"))
+        if len(distinct_bookies) < 2 or len(valid_matches) < 2:
             continue
 
-        sport = matches[0]["sport"]
-        home_name = matches[0]["home_team"]
-        away_name = matches[0]["away_team"]
+        sport = valid_matches[0].get("sport", "soccer")
+        home_name = valid_matches[0].get("home_team", "")
+        away_name = valid_matches[0].get("away_team", "")
+        competition = valid_matches[0].get("competition", "Unknown")
 
-        # Find best available odds across all sportsbooks
-        best_home = max(matches, key=lambda x: x.get("home_odds") or 0)
-        best_away = max(matches, key=lambda x: x.get("away_odds") or 0)
+        best_home = max(valid_matches, key=lambda x: x.get("home_odds") or 0)
+        best_away = max(valid_matches, key=lambda x: x.get("away_odds") or 0)
 
         o1 = best_home.get("home_odds")
         o2 = best_away.get("away_odds")
@@ -167,30 +210,58 @@ def find_arbitrage_opportunities(all_matches: List[Dict[str, Any]], total_stake:
         if not o1 or not o2:
             continue
 
-        # 1. 2-Way Sports Arbitrage (Tennis, Basketball, MMA)
-        if sport in ["tennis", "basketball", "volleyball", "mma", "table_tennis"]:
+        # 1. 2-WAY ARBITRAGE (Tennis, Basketball, Volleyball, MMA)
+        if sport in ["tennis", "basketball", "volleyball", "mma", "table_tennis", "baseball", "darts", "handball"]:
+            if str(best_home.get("bookmaker_id")) == str(best_away.get("bookmaker_id")):
+                continue
+
             arb_margin = (1.0 / o1) + (1.0 / o2)
-            if arb_margin < 1.0:  # Arbitrage exists!
-                profit_pct = (1.0 - arb_margin) * 100
-                stake_1 = round((total_stake / (o1 * arb_margin)), 2)
-                stake_2 = round((total_stake / (o2 * arb_margin)), 2)
-                guaranteed_payout = round(stake_1 * o1, 2)
-                
-                arbs.append({
-                    "sport": sport,
+
+            if 0.85 < arb_margin < 1.0:  # Valid margin check (1% - 15% profit range)
+                profit_pct = round((1.0 - arb_margin) * 100, 2)
+
+                raw_stake_1 = bankroll / (o1 * arb_margin)
+                raw_stake_2 = bankroll / (o2 * arb_margin)
+
+                stake_1 = round(raw_stake_1, -1)
+                stake_2 = round(raw_stake_2, -1)
+                total_invested = stake_1 + stake_2
+
+                payout_1 = round(stake_1 * o1, 2)
+                payout_2 = round(stake_2 * o2, 2)
+                min_payout = min(payout_1, payout_2)
+                net_profit = round(min_payout - total_invested, 2)
+
+                opportunities.append({
+                    "sport": sport.upper(),
+                    "competition": competition,
                     "event": f"{home_name} vs {away_name}",
-                    "type": "2-Way",
-                    "profit_margin_pct": round(profit_pct, 2),
-                    "guaranteed_payout": guaranteed_payout,
+                    "market_type": "2-Way Moneyline",
+                    "profit_margin_pct": profit_pct,
+                    "total_investment": total_invested,
+                    "guaranteed_net_profit": net_profit,
+                    "guaranteed_payout": min_payout,
                     "legs": [
-                        {"outcome": "Home (1)", "bookmaker": best_home["bookmaker_id"], "odds": o1, "stake": stake_1},
-                        {"outcome": "Away (2)", "bookmaker": best_away["bookmaker_id"], "odds": o2, "stake": stake_2},
+                        {
+                            "outcome": f"1 ({home_name})",
+                            "bookmaker": str(best_home.get("bookmaker_id", "")).upper(),
+                            "odds": o1,
+                            "recommended_stake": stake_1,
+                            "expected_payout": payout_1
+                        },
+                        {
+                            "outcome": f"2 ({away_name})",
+                            "bookmaker": str(best_away.get("bookmaker_id", "")).upper(),
+                            "odds": o2,
+                            "recommended_stake": stake_2,
+                            "expected_payout": payout_2
+                        }
                     ]
                 })
 
-        # 2. 3-Way Sports Arbitrage (Soccer 1X2)
+        # 2. 3-WAY ARBITRAGE (Soccer 1X2)
         else:
-            best_draw = max([m for m in matches if m.get("draw_odds") is not None], key=lambda x: x.get("draw_odds") or 0, default=None)
+            best_draw = max([m for m in valid_matches if m.get("draw_odds") is not None], key=lambda x: x.get("draw_odds") or 0, default=None)
             if not best_draw:
                 continue
 
@@ -198,29 +269,70 @@ def find_arbitrage_opportunities(all_matches: List[Dict[str, Any]], total_stake:
             if not oX:
                 continue
 
-            arb_margin = (1.0 / o1) + (1.0 / oX) + (1.0 / o2)
-            if arb_margin < 1.0:  # Arbitrage exists!
-                profit_pct = (1.0 - arb_margin) * 100
-                stake_1 = round((total_stake / (o1 * arb_margin)), 2)
-                stake_X = round((total_stake / (oX * arb_margin)), 2)
-                stake_2 = round((total_stake / (o2 * arb_margin)), 2)
-                guaranteed_payout = round(stake_1 * o1, 2)
+            used_bookies = set([
+                str(best_home.get("bookmaker_id")), 
+                str(best_draw.get("bookmaker_id")), 
+                str(best_away.get("bookmaker_id"))
+            ])
+            if len(used_bookies) < 2:
+                continue
 
-                arbs.append({
-                    "sport": sport,
+            arb_margin = (1.0 / o1) + (1.0 / oX) + (1.0 / o2)
+
+            if 0.85 < arb_margin < 1.0:
+                profit_pct = round((1.0 - arb_margin) * 100, 2)
+
+                raw_stake_1 = bankroll / (o1 * arb_margin)
+                raw_stake_X = bankroll / (oX * arb_margin)
+                raw_stake_2 = bankroll / (o2 * arb_margin)
+
+                stake_1 = round(raw_stake_1, -1)
+                stake_X = round(raw_stake_X, -1)
+                stake_2 = round(raw_stake_2, -1)
+                total_invested = stake_1 + stake_X + stake_2
+
+                payout_1 = round(stake_1 * o1, 2)
+                payout_X = round(stake_X * oX, 2)
+                payout_2 = round(stake_2 * o2, 2)
+                min_payout = min(payout_1, payout_X, payout_2)
+                net_profit = round(min_payout - total_invested, 2)
+
+                opportunities.append({
+                    "sport": sport.upper(),
+                    "competition": competition,
                     "event": f"{home_name} vs {away_name}",
-                    "type": "3-Way 1X2",
-                    "profit_margin_pct": round(profit_pct, 2),
-                    "guaranteed_payout": guaranteed_payout,
+                    "market_type": "3-Way 1X2",
+                    "profit_margin_pct": profit_pct,
+                    "total_investment": total_invested,
+                    "guaranteed_net_profit": net_profit,
+                    "guaranteed_payout": min_payout,
                     "legs": [
-                        {"outcome": "Home (1)", "bookmaker": best_home["bookmaker_id"], "odds": o1, "stake": stake_1},
-                        {"outcome": "Draw (X)", "bookmaker": best_draw["bookmaker_id"], "odds": oX, "stake": stake_X},
-                        {"outcome": "Away (2)", "bookmaker": best_away["bookmaker_id"], "odds": o2, "stake": stake_2},
+                        {
+                            "outcome": f"1 ({home_name})",
+                            "bookmaker": str(best_home.get("bookmaker_id", "")).upper(),
+                            "odds": o1,
+                            "recommended_stake": stake_1,
+                            "expected_payout": payout_1
+                        },
+                        {
+                            "outcome": "X (Draw)",
+                            "bookmaker": str(best_draw.get("bookmaker_id", "")).upper(),
+                            "odds": oX,
+                            "recommended_stake": stake_X,
+                            "expected_payout": payout_X
+                        },
+                        {
+                            "outcome": f"2 ({away_name})",
+                            "bookmaker": str(best_away.get("bookmaker_id", "")).upper(),
+                            "odds": o2,
+                            "recommended_stake": stake_2,
+                            "expected_payout": payout_2
+                        }
                     ]
                 })
 
-    arbs.sort(key=lambda x: x["profit_margin_pct"], reverse=True)
-    return arbs
+    opportunities.sort(key=lambda x: x["profit_margin_pct"], reverse=True)
+    return opportunities
 
 
 # -------------------------------------------------------------------
@@ -235,14 +347,6 @@ BOOKMAKER_REGISTRY = {
     "sportpesa": {"platform": "public_rest", "url": "https://www.sportpesa.co.tz/api/upcoming/games?sportId=1", "parser": "sportpesa"},
     "leonbet": {"platform": "public_rest", "url": "https://leonbet.co.tz/api-2/betline/events/all?ctag=en-US", "parser": "leonbet"},
     "premierbet": {"platform": "public_rest", "url": "https://sports-api.premierbet.co.tz/v1/events/highlights?country=TZ&group=g2&platform=desktop&locale=en&sportId=1&limit=50", "parser": "premierbet"},
-
-    # 1XCorp Direct Fast REST Endpoints
-    "1xbet": {"platform": "public_rest", "url": "https://1xbet.co.tz/LineFeed/Get1x2_VZip?sports=1&count=50&lng=en&mode=4&country=190&getEmpty=true", "parser": "1xcorp"},
-    "22bet": {"platform": "public_rest", "url": "https://22bet.co.tz/LineFeed/Get1x2_VZip?sports=1&count=50&lng=en&mode=4&country=190&getEmpty=true", "parser": "1xcorp"},
-    "helabet": {"platform": "public_rest", "url": "https://helabet.co.tz/LineFeed/Get1x2_VZip?sports=1&count=50&lng=en&mode=4&country=190&getEmpty=true", "parser": "1xcorp"},
-    "betwinner": {"platform": "public_rest", "url": "https://betwinner.co.tz/LineFeed/Get1x2_VZip?sports=1&count=50&lng=en&mode=4&country=190&getEmpty=true", "parser": "1xcorp"},
-    "melbet": {"platform": "public_rest", "url": "https://melbet.co.tz/LineFeed/Get1x2_VZip?sports=1&count=50&lng=en&mode=4&country=190&getEmpty=true", "parser": "1xcorp"},
-    "1xbit": {"platform": "public_rest", "url": "https://1xbit.com/LineFeed/Get1x2_VZip?sports=1&count=50&lng=en&mode=4&country=190&getEmpty=true", "parser": "1xcorp"},
 
     # Playwright Targets
     "galsport": {"platform": "playwright_spa", "url": "https://gsb.co.tz/en/sportsbook/highlights", "keywords": ["/api/", "highlights", "events"], "parser": "generic"},
@@ -278,7 +382,8 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
     parser_type = config.get("parser")
 
     detected = auto_detect_parser(payload)
-    if detected != "generic": parser_type = detected
+    if detected != "generic":
+        parser_type = detected
 
     raw_parsed = []
 
@@ -293,7 +398,7 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
                     home = extract_team_name(item.get("O1") or item.get("HT") or item.get("HomeTeam"))
                     away = extract_team_name(item.get("O2") or item.get("AT") or item.get("AwayTeam"))
                     
-                    raw_sport_id = item.get("SI") or item.get("SportId") or item.get("SN") or item.get("Sport")
+                    raw_sport_id = item.get("SI") or item.get("SportId") or item.get("SN")
                     detected_sport = resolve_sport_name(raw_sport_id)
                     competition = str(item.get("LE") or item.get("League") or "Unknown")
 
@@ -551,8 +656,6 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
             counts = Counter(m["sport"] for m in matches)
             breakdown = ", ".join(f"{sp}: {cnt}" for sp, cnt in counts.items())
             logger.info(f"[{bookmaker_id.upper()}] Parsed {len(matches)} valid matches ({breakdown})")
-        elif len(raw_parsed) > 0:
-            logger.warning(f"[{bookmaker_id.upper()}-VALIDATION-REJECT] Extracted {len(raw_parsed)} items, 0 passed validation. Sample: {raw_parsed[:1]}")
 
     except Exception as e:
         logger.error(f"[{bookmaker_id}] Parser Exception ({type(e).__name__}): {repr(e)}")
@@ -561,7 +664,7 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
 
 
 # -------------------------------------------------------------------
-# HARDENED HTTP FETCHER (ALLOWING HTTP 203 FOR 1XCORP CLONES)
+# HARDENED HTTP FETCHER
 # -------------------------------------------------------------------
 
 async def fetch_http_api(session: AsyncSession, bookmaker_id: str, config: dict, retries: int = 3) -> List[Dict[str, Any]]:
@@ -587,14 +690,13 @@ async def fetch_http_api(session: AsyncSession, bookmaker_id: str, config: dict,
                                 else:
                                     logger.warning(f"[SPORTPESA] Markets status {res_markets.status_code} (Attempt {attempt+1}/{retries})")
                             else:
-                                logger.warning(f"[SPORTPESA] No game IDs found in payload (Attempt {attempt+1}/{retries})")
+                                logger.warning(f"[SPORTPESA] No game IDs found (Attempt {attempt+1}/{retries})")
                         except Exception as parse_err:
                             logger.warning(f"[SPORTPESA] JSON parse error: {parse_err} (Attempt {attempt+1}/{retries})")
                     else:
                         logger.warning(f"[SPORTPESA] Highlights status {res_init.status_code} (Attempt {attempt+1}/{retries})")
                 else:
                     res = await session.get(url, headers=headers, impersonate="chrome", timeout=10)
-                    # Support HTTP 203 (1XCorp Cloudflare cache response)
                     if res.status_code in [200, 203]:
                         try:
                             return parse_raw_payload(bookmaker_id, res.json())
@@ -729,7 +831,7 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
                 parsed = parse_raw_payload(bookmaker_id, payload, latency_ms=latency_ms)
                 all_matches.extend(parsed)
 
-            unique_matches = list({f"{m['bookmaker_id']}_{m['match_id']}": m for m in all_matches if m.get("match_id")}.values()) if all_matches else []
+            unique_matches = list({f"{m['bookmaker_id']}_{m['match_id']}": m for m in all_matches if isinstance(m, dict) and m.get("match_id")}.values()) if all_matches else []
             logger.info(f"[{bm_label}-INTERCEPTOR] Parsed {len(unique_matches)} matches in {latency_ms}ms.")
             return unique_matches
 
@@ -739,7 +841,7 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
 
 
 # -------------------------------------------------------------------
-# DISPATCHER MASTER SCANNER LOOP WITH ARBITRAGE DETECTOR
+# DISPATCHER MASTER SCANNER LOOP
 # -------------------------------------------------------------------
 
 async def scrape_all_sportsbooks() -> Dict[str, Any]:
@@ -777,18 +879,21 @@ async def scrape_all_sportsbooks() -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Playwright Execution Batch Error: {repr(e)}")
 
-    # 3. Calculate Arbitrage Opportunities across 2-way and 3-way markets
-    arbitrage_opportunities = find_arbitrage_opportunities(all_matches, total_stake=10000.0)
+    # 3. Calculate True Cross-Bookmaker Arbitrage
+    arbitrage_ops = find_arbitrage_opportunities(all_matches, bankroll=100000.0)
 
-    logger.info(f"=== SCAN COMPLETED: Total {len(all_matches)} matches extracted | Found {len(arbitrage_opportunities)} Surebet Arbitrage Opportunities ===")
-    
-    if arbitrage_opportunities:
-        for arb in arbitrage_opportunities[:5]:
-            logger.info(f"🔥 [ARBITRAGE FOUND] {arb['sport'].upper()} ({arb['type']}): {arb['event']} - Profit: {arb['profit_margin_pct']}% | Legs: {arb['legs']}")
+    logger.info(f"=== SCAN COMPLETED: Extracted {len(all_matches)} matches | Found {len(arbitrage_ops)} True Cross-Bookmaker Surebets ===")
+
+    for idx, arb in enumerate(arbitrage_ops[:5], 1):
+        logger.info(f"\n⚡ [SUREBET #{idx}] +{arb['profit_margin_pct']}% Profit Margin")
+        logger.info(f"   Event: {arb['event']} [{arb['competition']}] ({arb['sport']})")
+        logger.info(f"   Bankroll: {arb['total_investment']:,.0f} TZS | Payout: {arb['guaranteed_payout']:,.0f} TZS (+{arb['guaranteed_net_profit']:,.0f} TZS Net Profit)")
+        for leg in arb['legs']:
+            logger.info(f"   👉 Bet {leg['recommended_stake']:,.0f} TZS on [{leg['bookmaker']}] @ {leg['odds']} for {leg['outcome']}")
 
     return {
         "matches_count": len(all_matches),
-        "arbitrage_opportunities_count": len(arbitrage_opportunities),
-        "arbitrage_opportunities": arbitrage_opportunities,
+        "arbitrage_opportunities_count": len(arbitrage_ops),
+        "arbitrage_opportunities": arbitrage_ops,
         "matches": all_matches
     }
