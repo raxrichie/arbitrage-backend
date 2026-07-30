@@ -5,7 +5,19 @@ import json
 from typing import Dict, List, Any, Optional
 
 from curl_cffi.requests import AsyncSession
-from playwright.async_api import async_playwright, Browser
+try:
+    # patchright is a drop-in Playwright fork purpose-built to defeat
+    # automation fingerprinting that plain Playwright + init-script stealth
+    # could not get past (confirmed: 0 matches across every SPA target even
+    # after adding navigator.webdriver spoofing etc.). Falls back to regular
+    # playwright if the package isn't installed yet, so this doesn't break
+    # deploys — but add `patchright` to requirements.txt and run
+    # `patchright install chromium` in your build step to actually use it.
+    from patchright.async_api import async_playwright, Browser
+    logger.info("Using patchright for browser automation (stealth fork).")
+except ImportError:
+    from playwright.async_api import async_playwright, Browser
+    logger.warning("patchright not installed — falling back to plain playwright (add 'patchright' to requirements.txt).")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("scrapers")
@@ -628,6 +640,33 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
                                 captured_payloads.append((response.url, json_data))
 
             page.on("response", handle_response)
+
+            # Diagnostic + capture: some live-odds SPAs push match/odds data
+            # over a WebSocket rather than plain HTTP fetch/XHR, which
+            # page.on("response") cannot see at all. Log every socket opened
+            # and try to capture any JSON frames that match our keywords, so
+            # we can tell definitively whether this is the real data channel.
+            def handle_websocket(ws):
+                logger.info(f"[{bm_label}-WS-DISCOVERY] WebSocket opened: {ws.url}")
+
+                def handle_frame(payload):
+                    try:
+                        text = payload if isinstance(payload, str) else payload.decode("utf-8", errors="ignore")
+                    except Exception:
+                        return
+                    lowered = text.lower()
+                    if any(kw.lower() in lowered for kw in keywords) or "odds" in lowered or "match" in lowered:
+                        try:
+                            json_data = json.loads(text)
+                            captured_payloads.append((ws.url, json_data))
+                            logger.info(f"[{bm_label}-WS-CAPTURE] Captured JSON frame from {ws.url} ({len(text)} chars)")
+                        except Exception:
+                            # Non-JSON frame (binary protocol, ping/pong, etc.) — just note it happened
+                            logger.info(f"[{bm_label}-WS-CAPTURE] Non-JSON frame from {ws.url}, preview: {text[:150]}")
+
+                ws.on("framereceived", handle_frame)
+
+            page.on("websocket", handle_websocket)
             logger.info(f"[{bm_label}-INTERCEPTOR] Navigating to {url}...")
 
             try:
