@@ -281,49 +281,54 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
                             "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
                         })
 
-        # 5. BANGBET (SAFE FLOAT CONVERSION FIX + STRUCTURE DEBUG)
+        # 5. BANGBET
+        # Real schema (confirmed via prior debug dump): each match has its own
+        # homeTeamName/awayTeamName fields directly, and marketList is a list of
+        # market GROUPS, each of which nests an inner "markets" list. The actual
+        # odds live in market["outcomes"], where each outcome has a "desc" field
+        # (either the team name text, or literally "draw") and an "odds" field —
+        # there is no type/HOME/AWAY marker, so we match on desc text + position.
         elif parser_type == "bangbet":
             groups = payload.get("data", {}).get("groupList", []) if isinstance(payload, dict) else []
-            _debug_logged = False
             for group in groups:
                 match_list = group.get("matchVoList") or group.get("matchList") or []
 
-                # One-off structural dump: fires once per payload the first time
-                # we see a non-empty match_list, so we can see real field names
-                # if bangbet has renamed marketList / marketCategory / options.
-                if not _debug_logged and match_list:
-                    sample = match_list[0]
-                    market_sample = sample.get("marketList")
-                    if isinstance(market_sample, list):
-                        market_preview = market_sample[:2]
-                    else:
-                        market_preview = market_sample
-                    logger.warning(
-                        f"[BANGBET-DEBUG] Sample match keys: {list(sample.keys())} | "
-                        f"marketList sample: {market_preview}"
-                    )
-                    _debug_logged = True
-
                 for match in match_list:
-                    name = str(match.get("name") or "")
-                    home, away = "", ""
-                    if " vs. " in name:
-                        parts = name.split(" vs. ", 1)
-                        home, away = parts[0], parts[1]
-                    elif " - " in name:
-                        parts = name.split(" - ", 1)
-                        home, away = parts[0], parts[1]
-                    else:
-                        home = extract_team_name(match.get("homeName") or match.get("homeTeam"))
-                        away = extract_team_name(match.get("awayName") or match.get("awayTeam"))
+                    home = extract_team_name(match.get("homeTeamName") or match.get("homeName") or match.get("homeTeam"))
+                    away = extract_team_name(match.get("awayTeamName") or match.get("awayName") or match.get("awayTeam"))
+
+                    if not home or not away:
+                        name = str(match.get("name") or "")
+                        if " vs. " in name:
+                            parts = name.split(" vs. ", 1)
+                            home, away = home or parts[0], away or parts[1]
+                        elif " - " in name:
+                            parts = name.split(" - ", 1)
+                            home, away = home or parts[0], away or parts[1]
 
                     o1, oX, o2 = None, None, None
-                    for market in match.get("marketList", []):
-                        if market.get("marketCategory") == 1 or "1X2" in str(market.get("marketName", "")).upper():
-                            options = market.get("optionList") or market.get("options") or []
-                            for idx, option in enumerate(options):
-                                opt_type = str(option.get("type") or option.get("optionType") or option.get("name") or "").upper()
-                                raw_price = option.get("odds") or option.get("price") or option.get("val")
+
+                    for market_group in match.get("marketList", []):
+                        # Bangbet nests real markets one level deeper under "markets".
+                        # Fall back to treating the group itself as the market if
+                        # a variant payload skips that extra nesting.
+                        inner_markets = market_group.get("markets") or (
+                            [market_group] if market_group.get("outcomes") else []
+                        )
+
+                        for market in inner_markets:
+                            m_name = str(market.get("name") or market.get("marketName") or "").upper()
+                            if not ("1X2" in m_name or "3-WAY" in m_name or str(market.get("id")) == "1"):
+                                continue
+
+                            outcomes = market.get("outcomes") or market.get("optionList") or market.get("options") or []
+                            for idx, outcome in enumerate(outcomes):
+                                desc = str(
+                                    outcome.get("desc") or outcome.get("type")
+                                    or outcome.get("optionType") or outcome.get("name") or ""
+                                ).strip()
+                                desc_upper = desc.upper()
+                                raw_price = outcome.get("odds") or outcome.get("price") or outcome.get("val")
 
                                 # Safe float parsing before division
                                 try:
@@ -336,17 +341,17 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
                                 else:
                                     price = safe_float(raw_val)
 
-                                if opt_type in ["1", "HOME"] or idx == 0:
-                                    if o1 is None: o1 = price
-                                elif opt_type in ["X", "DRAW"] or idx == 1:
+                                if desc_upper in ["DRAW", "X"]:
                                     if oX is None: oX = price
-                                elif opt_type in ["2", "AWAY"] or idx == 2:
+                                elif desc_upper in ["1", "HOME"] or (home and home.upper() == desc_upper) or idx == 0:
+                                    if o1 is None: o1 = price
+                                elif desc_upper in ["2", "AWAY"] or (away and away.upper() == desc_upper) or idx == 2:
                                     if o2 is None: o2 = price
 
                     raw_parsed.append({
                         "match_id": str(match.get("id") or match.get("matchId") or ""),
                         "home_team": home, "away_team": away,
-                        "competition": str(match.get("leagueName") or "Soccer"),
+                        "competition": str(match.get("tournamentName") or match.get("leagueName") or "Soccer"),
                         "home_odds": o1, "draw_odds": oX, "away_odds": o2,
                         "sport": "soccer", "market_type": "1X2",
                         "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
