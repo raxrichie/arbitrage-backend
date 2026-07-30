@@ -5,6 +5,10 @@ import json
 from typing import Dict, List, Any, Optional
 
 from curl_cffi.requests import AsyncSession
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("scrapers")
+
 try:
     # patchright is a drop-in Playwright fork purpose-built to defeat
     # automation fingerprinting that plain Playwright + init-script stealth
@@ -18,9 +22,6 @@ try:
 except ImportError:
     from playwright.async_api import async_playwright, Browser
     logger.warning("patchright not installed — falling back to plain playwright (add 'patchright' to requirements.txt).")
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("scrapers")
 
 # Modern Chrome Browser Headers to pass anti-bot header checks
 # NOTE: Removed fake Origin/Referer pointing at Google — a real page calling its
