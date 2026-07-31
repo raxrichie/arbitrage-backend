@@ -391,12 +391,12 @@ BOOKMAKER_REGISTRY = {
     "sportpesa": {"platform": "public_rest", "url": "https://www.sportpesa.co.tz/api/upcoming/games?sportId=1", "parser": "sportpesa"},
     "leonbet": {"platform": "public_rest", "url": "https://leonbet.co.tz/api-2/betline/events/all?ctag=en-US", "parser": "leonbet"},
     "premierbet": {"platform": "public_rest", "url": "https://sports-api.premierbet.co.tz/v1/events/highlights?country=TZ&group=g2&platform=desktop&locale=en&sportId=1&limit=50", "parser": "premierbet"},
-    "mozzartbet": {"platform": "public_rest", "url": "https://www.mozzartbet.co.tz/backend/odds/getMatches", "parser": "generic"},
+    "mozzartbet": {"platform": "public_rest", "url": "https://www.mozzartbet.co.tz/backend/odds/getMatches", "parser": "mozzartbet"},
     "betpawa": {"platform": "public_rest", "url": "https://www.betpawa.co.tz/api/pawa/v1/events", "parser": "generic"},
     "888bet": {"platform": "public_rest", "url": "https://888bet.co.tz/api/v1/events/highlights", "parser": "generic"},
     "wasafibet": {"platform": "public_rest", "url": "https://wasafibet.co.tz/api/v1/sportsbook/highlights", "parser": "generic"},
     "pmbet": {"platform": "public_rest", "url": "https://pmbet.co.tz/api/v1/events", "parser": "generic"},
-    "odibets": {"platform": "public_rest", "url": "https://odibets.co.tz/api/v1/matches", "parser": "generic"},
+    "odibets": {"platform": "public_rest", "url": "https://odibets.co.tz/api/v1/matches", "parser": "odibets"},
     "1win": {"platform": "public_rest", "url": "https://1win.co.tz/api/v1/sports/football", "parser": "generic"},
     "mostbet": {"platform": "public_rest", "url": "https://mostbet.co.tz/api/v1/events", "parser": "generic"},
     "thronebet": {"platform": "public_rest", "url": "https://thronebet.co.tz/api/v1/events", "parser": "generic"},
@@ -437,6 +437,12 @@ def auto_detect_parser(payload: Any) -> str:
     if isinstance(payload, dict):
         if "Value" in payload or "LE" in payload: return "1xcorp"
         if "home_team" in payload or "home_odd" in payload: return "betika"
+        if "matches" in payload and isinstance(payload.get("matches"), list):
+            sample = payload["matches"][0] if payload["matches"] else {}
+            if "homeTeamName" in sample or "specialOdds" in sample:
+                return "mozzartbet"
+            if "home" in sample and "away" in sample and "odds" in sample:
+                return "odibets"
         data_obj = payload.get("data")
         if isinstance(data_obj, dict):
             if "tournaments" in data_obj: return "sportybet"
@@ -525,7 +531,60 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
                         "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
                     })
 
-        # 3. BETIKA
+        # 3. MOZZARTBET PARSER
+        elif parser_type == "mozzartbet":
+            matches = payload.get("matches", []) if isinstance(payload, dict) else []
+            for item in matches:
+                if isinstance(item, dict):
+                    home = extract_team_name(item.get("homeTeamName") or item.get("home"))
+                    away = extract_team_name(item.get("visitorTeamName") or item.get("away"))
+                    comp = str(item.get("competitionName") or "Unknown")
+
+                    o1, oX, o2 = None, None, None
+                    special_odds = item.get("specialOdds") or item.get("odds") or []
+                    if isinstance(special_odds, list):
+                        for sub_odd in special_odds:
+                            if isinstance(sub_odd, dict):
+                                sub_type = str(sub_odd.get("subType", "")).upper()
+                                value = safe_float(sub_odd.get("value") or sub_odd.get("odd"))
+                                if sub_type in ["1", "HOME", "K1"]: o1 = value
+                                elif sub_type in ["X", "DRAW", "X1"]: oX = value
+                                elif sub_type in ["2", "AWAY", "K2"]: o2 = value
+
+                    raw_parsed.append({
+                        "match_id": str(item.get("id") or ""),
+                        "home_team": home, "away_team": away,
+                        "competition": comp,
+                        "home_odds": o1, "draw_odds": oX, "away_odds": o2,
+                        "sport": "soccer", "market_type": "1X2",
+                        "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
+                    })
+
+        # 4. ODIBETS PARSER
+        elif parser_type == "odibets":
+            matches = payload.get("matches", []) if isinstance(payload, dict) else (payload if isinstance(payload, list) else [])
+            for item in matches:
+                if isinstance(item, dict):
+                    home = extract_team_name(item.get("home") or item.get("home_team"))
+                    away = extract_team_name(item.get("away") or item.get("away_team"))
+                    comp = str(item.get("parent_match_name") or item.get("league") or "Unknown")
+
+                    o1, oX, o2 = None, None, None
+                    odds = item.get("odds", {}) if isinstance(item.get("odds"), dict) else {}
+                    o1 = safe_float(odds.get("1") or odds.get("home"))
+                    oX = safe_float(odds.get("X") or odds.get("draw"))
+                    o2 = safe_float(odds.get("2") or odds.get("away"))
+
+                    raw_parsed.append({
+                        "match_id": str(item.get("id") or item.get("match_id") or ""),
+                        "home_team": home, "away_team": away,
+                        "competition": comp,
+                        "home_odds": o1, "draw_odds": oX, "away_odds": o2,
+                        "sport": "soccer", "market_type": "1X2",
+                        "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
+                    })
+
+        # 5. BETIKA
         elif parser_type == "betika":
             events = payload.get("data", []) if isinstance(payload, dict) else (payload if isinstance(payload, list) else [])
             for item in events:
@@ -542,7 +601,7 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
                         "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
                     })
 
-        # 4. LEONBET
+        # 6. LEONBET
         elif parser_type == "leonbet":
             events = payload.get("events", []) if isinstance(payload, dict) else []
             for item in events:
@@ -595,7 +654,7 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
                             "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
                         })
 
-        # 5. PREMIERBET
+        # 7. PREMIERBET
         elif parser_type == "premierbet":
             categories = payload.get("data", {}).get("categories", []) if isinstance(payload, dict) and isinstance(payload.get("data"), dict) else []
             for cat in categories:
@@ -645,7 +704,7 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
                                         "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
                                     })
 
-        # 6. BANGBET
+        # 8. BANGBET
         elif parser_type == "bangbet":
             groups = payload.get("data", {}).get("groupList", []) if isinstance(payload, dict) and isinstance(payload.get("data"), dict) else []
             for group in groups:
@@ -695,7 +754,7 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
                                 "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
                             })
 
-        # 7. SPORTYBET
+        # 9. SPORTYBET
         elif parser_type == "sportybet":
             data_obj = payload.get("data", {}) if isinstance(payload, dict) else {}
             tournaments = data_obj.get("tournaments", []) or data_obj.get("events", []) if isinstance(data_obj, dict) else []
@@ -730,7 +789,7 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
                                 "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
                             })
 
-        # 8. SPORTPESA
+        # 10. SPORTPESA
         elif parser_type == "sportpesa":
             games = payload if isinstance(payload, list) else (payload.get("data") or payload.get("games") or payload.get("events") or []) if isinstance(payload, dict) else []
             for item in games:
@@ -764,7 +823,7 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
                         "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
                     })
 
-        # 9. RECURSIVE GENERIC FALLBACK
+        # 11. RECURSIVE GENERIC FALLBACK
         else:
             events = find_events_recursive(payload)
             for item in events:
