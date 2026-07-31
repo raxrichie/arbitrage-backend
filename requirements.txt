@@ -1,11 +1,45 @@
+# ============================
+# Core Web Framework
+# ============================
 fastapi==0.111.0
 uvicorn[standard]==0.30.1
+gunicorn==22.0.0
+
+# ============================
+# Browser Automation
+# ============================
 playwright==1.44.0
 playwright-stealth==1.0.6
 git+https://github.com/raxrichie/patchright.git@main
-redis==5.0.4
+
+# ============================
+# HTTP Clients
+# ============================
+curl-cffi==0.7.1
 httpx==0.27.0
+
+# ============================
+# Data Validation
+# ============================
 pydantic==2.7.2
 python-dotenv==1.0.1
-curl-cffi==0.7.1
-# force rebuild ASAP
+
+# ============================
+# Cache / Storage
+# ============================
+redis==5.0.4
+
+# ============================
+# Serialization
+# ============================
+orjson==3.10.6
+
+# ============================
+# Utilities
+# ============================
+typing-extensions>=4.11.0
+anyio>=4.4.0
+sniffio>=1.3.1
+certifi>=2024.7.4
+idna>=3.7
+h11>=0.14.0
