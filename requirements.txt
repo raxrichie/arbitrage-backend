@@ -6,32 +6,26 @@ uvicorn[standard]==0.30.1
 gunicorn==22.0.0
 
 # ============================
-# Browser Automation
+# Browser Automation (Stealth)
 # ============================
-playwright==1.44.0
-playwright-stealth==1.0.6
-git+https://github.com/raxrichie/patchright.git@main
+patchright @ git+https://github.com/raxrichie/patchright.git@main
 
 # ============================
 # HTTP Clients
 # ============================
 curl-cffi==0.7.1
-httpx==0.27.0
+httpx>=0.27.0
 
 # ============================
-# Data Validation
+# Data Validation & Env
 # ============================
 pydantic==2.7.2
 python-dotenv==1.0.1
 
 # ============================
-# Cache / Storage
+# Cache & Serialization
 # ============================
 redis==5.0.4
-
-# ============================
-# Serialization
-# ============================
 orjson==3.10.6
 
 # ============================
