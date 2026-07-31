@@ -11,14 +11,15 @@ from curl_cffi.requests import AsyncSession
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("scrapers")
 
+# Try patchright stealth fork first, fallback to standard playwright
 try:
     from patchright.async_api import async_playwright, Browser
-    logger.info("Using patchright for browser automation (stealth fork).")
+    logger.info("Using patchright for browser automation (stealth fork enabled).")
 except ImportError:
     from playwright.async_api import async_playwright, Browser
     logger.warning("patchright not installed — falling back to plain playwright.")
 
-DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 
 REAL_BROWSER_HEADERS = {
     "User-Agent": DESKTOP_USER_AGENT,
@@ -28,9 +29,27 @@ REAL_BROWSER_HEADERS = {
     "Sec-Fetch-Site": "same-origin",
     "Sec-Fetch-Mode": "cors",
     "Sec-Fetch-Dest": "empty",
-    "Sec-Ch-Ua": '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
+    "Sec-Ch-Ua": '"Not/A)Brand";v="8", "Chromium";v="125", "Google Chrome";v="125"',
     "Sec-Ch-Ua-Mobile": "?0",
     "Sec-Ch-Ua-Platform": '"Windows"',
+}
+
+# Dedicated Headers for 1xCorp Family to clear HTTP 203 Javascript Challenge Pages
+ONE_X_HEADERS = {
+    "User-Agent": DESKTOP_USER_AGENT,
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "X-Requested-With": "XMLHttpRequest",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
+}
+
+# Headers for MeridianBet to bypass HTTP 403 Forbidden
+MERIDIAN_HEADERS = {
+    "User-Agent": DESKTOP_USER_AGENT,
+    "Accept": "application/json, text/plain, */*",
+    "Origin": "https://meridianbet.co.tz",
+    "Referer": "https://meridianbet.co.tz/en/betting/football",
 }
 
 SPORT_MAP = {
@@ -99,10 +118,20 @@ def generate_event_fingerprint(home: str, away: str, sport: str) -> str:
     return f"{sport}_{home_key}_vs_{away_key}"
 
 
-def get_dynamic_headers(target_url: str) -> Dict[str, str]:
+def get_dynamic_headers(target_url: str, is_1xcorp: bool = False, is_meridian: bool = False) -> Dict[str, str]:
+    if is_meridian:
+        return dict(MERIDIAN_HEADERS)
+
     parsed = urlparse(target_url)
     clean_netloc = parsed.netloc.replace("api.", "www.").replace("bet-api.", "www.")
     origin = f"{parsed.scheme}://{clean_netloc}"
+    
+    if is_1xcorp:
+        headers = dict(ONE_X_HEADERS)
+        headers["Referer"] = f"{origin}/en/line/football"
+        headers["Origin"] = origin
+        return headers
+
     headers = dict(REAL_BROWSER_HEADERS)
     headers["Referer"] = f"{origin}/"
     headers["Origin"] = origin
@@ -133,7 +162,6 @@ def validate_match(match: Dict[str, Any]) -> bool:
     away = extract_team_name(match.get("away_team", ""))
     comp = str(match.get("competition", "")).lower()
     
-    # Filter virtual/simulated RNG matches
     virtual_keywords = ["zoom", "virtual", "cyber", "simulated", "srl", "esoccer", "eleague"]
     if any(k in comp or k in home.lower() or k in away.lower() for k in virtual_keywords):
         return False
@@ -352,33 +380,50 @@ def find_arbitrage_opportunities(all_matches: List[Dict[str, Any]], bankroll: fl
 
 
 # -------------------------------------------------------------------
-# BOOKMAKER REGISTRY (CONVERTED TO DIRECT REST ENDPOINTS)
+# FULL 33 TANZANIAN BOOKMAKER REGISTRY
 # -------------------------------------------------------------------
 
 BOOKMAKER_REGISTRY = {
-    # Tier 1: Public REST APIs
+    # Tier 1: Direct Public REST APIs
     "betika": {"platform": "public_rest", "url": "https://api.betika.com/v1/uo/matches?limit=100&sub_type=prematch", "parser": "betika"},
     "sportybet": {"platform": "public_rest", "url": "https://www.sportybet.com/api/tz/factsCenter/pcUpcomingEvents?sportId=sr%3Asport%3A1&marketId=1%2C18%2C10%2C29%2C11%2C26%2C36%2C14%2C60100&pageSize=100&pageNum=1&option=1", "parser": "sportybet"},
     "bangbet": {"platform": "public_rest", "url": "https://bet-api.bangbet.com/api/bet/match/listTop?country=tz", "parser": "bangbet"},
     "sportpesa": {"platform": "public_rest", "url": "https://www.sportpesa.co.tz/api/upcoming/games?sportId=1", "parser": "sportpesa"},
     "leonbet": {"platform": "public_rest", "url": "https://leonbet.co.tz/api-2/betline/events/all?ctag=en-US", "parser": "leonbet"},
     "premierbet": {"platform": "public_rest", "url": "https://sports-api.premierbet.co.tz/v1/events/highlights?country=TZ&group=g2&platform=desktop&locale=en&sportId=1&limit=50", "parser": "premierbet"},
+    "mozzartbet": {"platform": "public_rest", "url": "https://www.mozzartbet.co.tz/backend/odds/getMatches", "parser": "generic"},
+    "betpawa": {"platform": "public_rest", "url": "https://www.betpawa.co.tz/api/pawa/v1/events", "parser": "generic"},
+    "888bet": {"platform": "public_rest", "url": "https://888bet.co.tz/api/v1/events/highlights", "parser": "generic"},
+    "wasafibet": {"platform": "public_rest", "url": "https://wasafibet.co.tz/api/v1/sportsbook/highlights", "parser": "generic"},
+    "pmbet": {"platform": "public_rest", "url": "https://pmbet.co.tz/api/v1/events", "parser": "generic"},
+    "odibets": {"platform": "public_rest", "url": "https://odibets.co.tz/api/v1/matches", "parser": "generic"},
+    "1win": {"platform": "public_rest", "url": "https://1win.co.tz/api/v1/sports/football", "parser": "generic"},
+    "mostbet": {"platform": "public_rest", "url": "https://mostbet.co.tz/api/v1/events", "parser": "generic"},
+    "thronebet": {"platform": "public_rest", "url": "https://thronebet.co.tz/api/v1/events", "parser": "generic"},
+    "winprincess": {"platform": "public_rest", "url": "https://winprincess.co.tz/api/v1/sportsbook", "parser": "generic"},
+    "playmaster": {"platform": "public_rest", "url": "https://playmaster.co.tz/api/v1/events", "parser": "generic"},
+    "kingbet": {"platform": "public_rest", "url": "https://kingbet.co.tz/api/v1/events", "parser": "generic"},
+    "betafriq": {"platform": "public_rest", "url": "https://betafriq.co.tz/api/v1/sportsbook", "parser": "generic"},
+    "10bet": {"platform": "public_rest", "url": "https://10bet.co.tz/api/v1/events", "parser": "generic"},
+    "mbet": {"platform": "public_rest", "url": "https://mbet.co.tz/api/v1/sportsbook/matches", "parser": "generic"},
 
-    # Converted Direct APIs for 1xBet Platform Clones (Get1x2_CompressZip)
-    "1xbet": {"platform": "public_rest", "url": "https://1xbet.co.tz/LineFeed/Get1x2_CompressZip?sports=1&count=50&lng=en&mode=4", "parser": "1xcorp"},
-    "22bet": {"platform": "public_rest", "url": "https://22bet.co.tz/LineFeed/Get1x2_CompressZip?sports=1&count=50&lng=en&mode=4", "parser": "1xcorp"},
-    "betwinner": {"platform": "public_rest", "url": "https://betwinner.co.tz/LineFeed/Get1x2_CompressZip?sports=1&count=50&lng=en&mode=4", "parser": "1xcorp"},
-    "helabet": {"platform": "public_rest", "url": "https://helabet.co.tz/LineFeed/Get1x2_CompressZip?sports=1&count=50&lng=en&mode=4", "parser": "1xcorp"},
-    "1xbit": {"platform": "public_rest", "url": "https://1xbit.com/LineFeed/Get1x2_CompressZip?sports=1&count=50&lng=en&mode=4", "parser": "1xcorp"},
-    "melbet": {"platform": "public_rest", "url": "https://melbet.co.tz/LineFeed/Get1x2_CompressZip?sports=1&count=50&lng=en&mode=4", "parser": "1xcorp"},
+    # 1XCorp Platform Engine (Requires XMLHttpRequest Headers)
+    "1xbet": {"platform": "public_rest", "url": "https://1xbet.co.tz/LineFeed/Get1x2_CompressZip?sports=1&count=50&lng=en&mode=4", "parser": "1xcorp", "is_1xcorp": True},
+    "betwinner": {"platform": "public_rest", "url": "https://betwinner.co.tz/LineFeed/Get1x2_CompressZip?sports=1&count=50&lng=en&mode=4", "parser": "1xcorp", "is_1xcorp": True},
+    "helabet": {"platform": "public_rest", "url": "https://helabet.co.tz/LineFeed/Get1x2_CompressZip?sports=1&count=50&lng=en&mode=4", "parser": "1xcorp", "is_1xcorp": True},
+    "1xbit": {"platform": "public_rest", "url": "https://1xbit.com/LineFeed/Get1x2_CompressZip?sports=1&count=50&lng=en&mode=4", "parser": "1xcorp", "is_1xcorp": True},
+    "megapari": {"platform": "public_rest", "url": "https://megapari.com/service-api/LineFeed/Get1x2_CompressZip?sports=1&count=50&lng=en&mode=4", "parser": "1xcorp", "is_1xcorp": True},
+    "22bet": {"platform": "public_rest", "url": "https://22bet.co.tz/service-api/LineFeed/Get1x2_CompressZip?sports=1&count=50&lng=en&mode=4", "parser": "1xcorp", "is_1xcorp": True},
+    "melbet": {"platform": "public_rest", "url": "https://melbet.co.tz/service-api/LineFeed/Get1x2_CompressZip?sports=1&count=50&lng=en&mode=4", "parser": "1xcorp", "is_1xcorp": True},
 
-    # Converted Direct API for MeridianBet
-    "meridianbet": {"platform": "public_rest", "url": "https://meridianbet.co.tz/api/v1/events/highlights", "parser": "meridianbet"},
+    # MeridianBet Direct API
+    "meridianbet": {"platform": "public_rest", "url": "https://meridianbet.co.tz/api/v1/events/highlights?sportId=1", "parser": "meridianbet", "is_meridian": True},
 
-    # Tier 2: Remaining SPA Targets via Playwright
-    "galsport": {"platform": "playwright_spa", "url": "https://gsb.co.tz/en/sportsbook/highlights", "keywords": ["/api/", "highlights", "events", "sportsbook", "get", "fixtures"], "parser": "generic"},
-    "parimatch": {"platform": "playwright_spa", "url": "https://parimatch.co.tz/en/football", "keywords": ["prematch", "events", "sportsbook", "/api/", "line"], "parser": "generic"},
-    "betway": {"platform": "playwright_spa", "url": "https://www.betway.co.tz/sport/soccer", "keywords": ["highlights", "sportsapi", "event", "betbook"], "parser": "generic"},
+    # Tier 2: Protected SPAs via Playwright Interceptors
+    "galsport": {"platform": "playwright_spa", "url": "https://gsb.co.tz/en/sportsbook/highlights", "keywords": ["/api/", "highlights", "events", "sportsbook"], "parser": "generic"},
+    "parimatch": {"platform": "playwright_spa", "url": "https://parimatch.co.tz/en/football", "keywords": ["prematch", "events", "sportsbook", "/api/"], "parser": "generic"},
+    "betway": {"platform": "playwright_spa", "url": "https://www.betway.co.tz/sport/soccer", "keywords": ["highlights", "sportsapi", "event"], "parser": "generic"},
+    "sokabet": {"platform": "playwright_spa", "url": "https://sokabet.co.tz", "keywords": ["api", "events", "highlights"], "parser": "generic"},
 }
 
 BOOKMAKER_MAP = {bm: None for bm in BOOKMAKER_REGISTRY.keys()}
@@ -454,8 +499,8 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
             events = payload.get("events", []) if isinstance(payload, dict) else (payload if isinstance(payload, list) else [])
             for item in events:
                 if isinstance(item, dict):
-                    home = extract_team_name(item.get("homeTeam") or item.get("home_team"))
-                    away = extract_team_name(item.get("awayTeam") or item.get("away_team"))
+                    home = extract_team_name(item.get("homeTeam", {}).get("name") if isinstance(item.get("homeTeam"), dict) else item.get("homeTeam"))
+                    away = extract_team_name(item.get("awayTeam", {}).get("name") if isinstance(item.get("awayTeam"), dict) else item.get("awayTeam"))
                     comp = str(item.get("league", {}).get("name") if isinstance(item.get("league"), dict) else (item.get("competition") or "Soccer"))
 
                     o1, oX, o2 = None, None, None
@@ -764,7 +809,9 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
 
 async def fetch_http_api(session: AsyncSession, bookmaker_id: str, config: dict, retries: int = 3) -> List[Dict[str, Any]]:
     url = config["url"]
-    headers = get_dynamic_headers(url)
+    is_1xcorp = config.get("is_1xcorp", False)
+    is_meridian = config.get("is_meridian", False)
+    headers = get_dynamic_headers(url, is_1xcorp=is_1xcorp, is_meridian=is_meridian)
 
     async with HTTP_SEMAPHORE:
         for attempt in range(retries):
@@ -813,7 +860,7 @@ async def fetch_http_api(session: AsyncSession, bookmaker_id: str, config: dict,
 
 
 # -------------------------------------------------------------------
-# PLAYWRIGHT INTERCEPTOR WITH SAFE DIAGNOSTIC LOGGING
+# PLAYWRIGHT INTERCEPTOR WITH STEALTH LAUNCH FLAGS
 # -------------------------------------------------------------------
 
 async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: dict, max_timeout: float = 8.0) -> List[Dict[str, Any]]:
@@ -868,44 +915,15 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
 
                                 if json_data:
                                     captured_payloads.append((response.url, json_data))
-                                    if isinstance(json_data, dict):
-                                        keys_sample = list(json_data.keys())[:8]
-                                        logger.debug(f"[{bm_label}-CAPTURED] {response.url} | Dict Keys: {keys_sample}")
-                                    elif isinstance(json_data, list):
-                                        logger.debug(f"[{bm_label}-CAPTURED] {response.url} | List Count: {len(json_data)}")
 
             page.on("response", handle_response)
-
-            def handle_websocket(ws):
-                def handle_frame(payload):
-                    try:
-                        text = payload if isinstance(payload, str) else payload.decode("utf-8", errors="ignore")
-                    except Exception:
-                        return
-                    lowered = text.lower()
-                    if any(kw.lower() in lowered for kw in keywords) or "odds" in lowered or "match" in lowered:
-                        try:
-                            json_data = json.loads(text)
-                            captured_payloads.append((ws.url, json_data))
-                        except Exception:
-                            pass
-
-                ws.on("framereceived", handle_frame)
-
-            page.on("websocket", handle_websocket)
             logger.info(f"[{bm_label}-INTERCEPTOR] Navigating to {url}...")
 
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=12000)
-
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=6000)
-                except Exception:
-                    pass
-
                 await page.mouse.move(300, 400)
                 await page.evaluate("window.scrollBy(0, 500)")
-                await asyncio.sleep(3.0)
+                await asyncio.sleep(2.0)
             except Exception:
                 logger.warning(f"[{bm_label}-INTERCEPTOR] Navigation timeout warning, processing captured payloads...")
 
@@ -913,7 +931,6 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
             await context.close()
 
             latency_ms = int((time.time() - start_t) * 1000)
-
             logger.info(f"[{bm_label}-INTERCEPTOR] Captured {len(captured_payloads)} total network payloads.")
 
             for res_url, payload in captured_payloads:
@@ -946,7 +963,7 @@ async def scrape_all_sportsbooks() -> Dict[str, Any]:
             if isinstance(res, list):
                 all_matches.extend([x for x in res if isinstance(x, dict)])
 
-    # 2. Concurrent Playwright Interceptors
+    # 2. Concurrent Playwright Interceptors with Anti-Detect Launch Flags
     playwright_targets = {bm: cfg for bm, cfg in BOOKMAKER_REGISTRY.items() if cfg["platform"] == "playwright_spa"}
 
     try:
@@ -954,9 +971,10 @@ async def scrape_all_sportsbooks() -> Dict[str, Any]:
             browser = await p.chromium.launch(
                 headless=True,
                 args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
                     "--disable-blink-features=AutomationControlled",
-                    "--disable-dev-shm-usage",
-                    "--no-sandbox"
+                    "--disable-dev-shm-usage"
                 ]
             )
             pw_tasks = [intercept_playwright_spa(browser, bm, cfg) for bm, cfg in playwright_targets.items()]
