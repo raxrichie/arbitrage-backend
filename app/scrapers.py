@@ -364,14 +364,14 @@ BOOKMAKER_REGISTRY = {
     "premierbet": {"platform": "public_rest", "url": "https://sports-api.premierbet.co.tz/v1/events/highlights?country=TZ&group=g2&platform=desktop&locale=sw&sportId=1&limit=50", "parser": "premierbet", "timeout": 8},
     "22bet": {"platform": "public_rest", "url": "https://22bet.co.tz/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en_GB&gr=329&mode=4&country=181&partner=151", "parser": "1xcorp", "timeout": 10},
 
-    # SPA Targets via Stealth Playwright Interceptors
+    # SPA Targets via Stealth Playwright Interceptors (Refined Feed Keywords)
     "mbet": {"platform": "playwright_spa", "url": "https://mbet.co.tz", "keywords": ["/api/", "sportsbook", "matches", "events"], "parser": "generic"},
-    "1xbet": {"platform": "playwright_spa", "url": "https://1xbet.co.tz/en/line/football", "keywords": ["linefeed", "get1x2", "linezip", "bff-api", "zip", "expressday"], "parser": "1xcorp"},
-    "betwinner": {"platform": "playwright_spa", "url": "https://betwinner.co.tz/en/line/football", "keywords": ["linefeed", "get1x2", "linezip", "bff-api", "zip", "expressday"], "parser": "1xcorp"},
-    "helabet": {"platform": "playwright_spa", "url": "https://helabet.co.tz/en/line/football", "keywords": ["linefeed", "get1x2", "linezip", "bff-api", "zip", "expressday"], "parser": "1xcorp"},
-    "1xbit": {"platform": "playwright_spa", "url": "https://1xbit.com/en/line/football", "keywords": ["linefeed", "get1x2", "linezip", "bff-api", "zip", "expressday"], "parser": "1xcorp"},
-    "megapari": {"platform": "playwright_spa", "url": "https://megapari.com/en/line/football", "keywords": ["linefeed", "get1x2", "linezip", "bff-api", "zip", "expressday"], "parser": "1xcorp"},
-    "melbet": {"platform": "playwright_spa", "url": "https://melbet.co.tz/en/line/football", "keywords": ["linefeed", "get1x2", "linezip", "bff-api", "zip", "expressday"], "parser": "1xcorp"},
+    "1xbet": {"platform": "playwright_spa", "url": "https://1xbet.co.tz/en/line/football", "keywords": ["get1x2", "linefeed", "livefeed", "getevents", "getgames", "zip"], "parser": "1xcorp"},
+    "betwinner": {"platform": "playwright_spa", "url": "https://betwinner.co.tz/en/line/football", "keywords": ["get1x2", "linefeed", "livefeed", "getevents", "getgames", "zip"], "parser": "1xcorp"},
+    "helabet": {"platform": "playwright_spa", "url": "https://helabet.co.tz/en/line/football", "keywords": ["get1x2", "linefeed", "livefeed", "getevents", "getgames", "zip"], "parser": "1xcorp"},
+    "1xbit": {"platform": "playwright_spa", "url": "https://1xbit.com/en/line/football", "keywords": ["get1x2", "linefeed", "livefeed", "getevents", "getgames", "zip"], "parser": "1xcorp"},
+    "megapari": {"platform": "playwright_spa", "url": "https://megapari.com/en/line/football", "keywords": ["get1x2", "linefeed", "livefeed", "getevents", "getgames", "zip"], "parser": "1xcorp"},
+    "melbet": {"platform": "playwright_spa", "url": "https://melbet.co.tz/en/line/football", "keywords": ["get1x2", "linefeed", "livefeed", "getevents", "getgames", "zip"], "parser": "1xcorp"},
     "1win": {"platform": "playwright_spa", "url": "https://1win.co.tz", "keywords": ["/api/", "sports", "football", "matches"], "parser": "generic"},
     "thronebet": {"platform": "playwright_spa", "url": "https://thronebet.co.tz/en/sportsbook", "keywords": ["/api/", "events", "highlights"], "parser": "generic"},
     "meridianbet": {"platform": "playwright_spa", "url": "https://meridianbet.co.tz/en/betting/football", "keywords": ["/events/", "standard", "v2", "sports", "games"], "parser": "meridianbet"},
@@ -397,6 +397,10 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
 
     try:
         if not isinstance(payload, (dict, list)):
+            return []
+
+        # Ignore UI Configuration dictionaries
+        if isinstance(payload, dict) and any(k.startswith("-") for k in payload.keys()):
             return []
 
         # 1. 1XCORP CLONES (22BET, 1XBET, BETWINNER, ETC.)
@@ -462,7 +466,6 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
         elif parser_type == "meridianbet":
             events_list = []
             if isinstance(payload, dict):
-                # Meridianbet standard hierarchy: sports -> categories -> tournaments -> events
                 sports = payload.get("sports", []) or [payload]
                 for sport_obj in sports:
                     if isinstance(sport_obj, dict):
@@ -761,7 +764,7 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
 
 
 # -------------------------------------------------------------------
-# HARDENED HTTP FETCHER WITH PER-BOOKMAKER TIMEOUTS
+# HARDENED HTTP FETCHER WITH INDIVIDUAL BOOKMAKER TIMEOUTS
 # -------------------------------------------------------------------
 
 async def fetch_http_api(session: AsyncSession, bookmaker_id: str, config: dict, retries: int = 1) -> List[Dict[str, Any]]:
@@ -829,7 +832,7 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
                 if response.status in [200, 203]:
                     res_url = response.url.lower()
 
-                    if "growthbook" not in res_url and "analytics" not in res_url:
+                    if "growthbook" not in res_url and "analytics" not in res_url and "/config/" not in res_url:
                         if any(kw.lower() in res_url for kw in keywords):
                             json_data = None
                             try:
