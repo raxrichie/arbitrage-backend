@@ -11,7 +11,7 @@ from curl_cffi.requests import AsyncSession
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("scrapers")
 
-# Try patchright stealth fork first, fallback to standard playwright
+# Stealth browser patchright initialization
 try:
     from patchright.async_api import async_playwright, Browser
     logger.info("Using patchright for browser automation (stealth fork enabled).")
@@ -19,14 +19,7 @@ except ImportError:
     from playwright.async_api import async_playwright, Browser
     logger.warning("patchright not installed — falling back to plain playwright.")
 
-try:
-    from playwright_stealth import stealth_async
-    STEALTH_AVAILABLE = True
-except ImportError:
-    STEALTH_AVAILABLE = False
-    logger.warning("playwright-stealth not installed — Playwright interceptors will run without it (add 'playwright-stealth' to requirements.txt).")
-
-DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
 REAL_BROWSER_HEADERS = {
     "User-Agent": DESKTOP_USER_AGENT,
@@ -36,27 +29,9 @@ REAL_BROWSER_HEADERS = {
     "Sec-Fetch-Site": "same-origin",
     "Sec-Fetch-Mode": "cors",
     "Sec-Fetch-Dest": "empty",
-    "Sec-Ch-Ua": '"Not/A)Brand";v="8", "Chromium";v="125", "Google Chrome";v="125"',
+    "Sec-Ch-Ua": '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
     "Sec-Ch-Ua-Mobile": "?0",
     "Sec-Ch-Ua-Platform": '"Windows"',
-}
-
-# Dedicated Headers for 1xCorp Family to clear HTTP 203 Javascript Challenge Pages
-ONE_X_HEADERS = {
-    "User-Agent": DESKTOP_USER_AGENT,
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "X-Requested-With": "XMLHttpRequest",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-origin",
-}
-
-# Headers for MeridianBet to bypass HTTP 403 Forbidden
-MERIDIAN_HEADERS = {
-    "User-Agent": DESKTOP_USER_AGENT,
-    "Accept": "application/json, text/plain, */*",
-    "Origin": "https://meridianbet.co.tz",
-    "Referer": "https://meridianbet.co.tz/en/betting/football",
 }
 
 SPORT_MAP = {
@@ -125,20 +100,10 @@ def generate_event_fingerprint(home: str, away: str, sport: str) -> str:
     return f"{sport}_{home_key}_vs_{away_key}"
 
 
-def get_dynamic_headers(target_url: str, is_1xcorp: bool = False, is_meridian: bool = False) -> Dict[str, str]:
-    if is_meridian:
-        return dict(MERIDIAN_HEADERS)
-
+def get_dynamic_headers(target_url: str) -> Dict[str, str]:
     parsed = urlparse(target_url)
     clean_netloc = parsed.netloc.replace("api.", "www.").replace("bet-api.", "www.")
     origin = f"{parsed.scheme}://{clean_netloc}"
-    
-    if is_1xcorp:
-        headers = dict(ONE_X_HEADERS)
-        headers["Referer"] = f"{origin}/en/line/football"
-        headers["Origin"] = origin
-        return headers
-
     headers = dict(REAL_BROWSER_HEADERS)
     headers["Referer"] = f"{origin}/"
     headers["Origin"] = origin
@@ -387,55 +352,35 @@ def find_arbitrage_opportunities(all_matches: List[Dict[str, Any]], bankroll: fl
 
 
 # -------------------------------------------------------------------
-# FULL 33 TANZANIAN BOOKMAKER REGISTRY
+# OPTIMIZED BOOKMAKER REGISTRY
 # -------------------------------------------------------------------
 
 BOOKMAKER_REGISTRY = {
-    # Tier 1: Direct Public REST APIs
+    # Tier 1: Working Direct REST APIs
     "betika": {"platform": "public_rest", "url": "https://api.betika.com/v1/uo/matches?limit=100&sub_type=prematch", "parser": "betika"},
     "sportybet": {"platform": "public_rest", "url": "https://www.sportybet.com/api/tz/factsCenter/pcUpcomingEvents?sportId=sr%3Asport%3A1&marketId=1%2C18%2C10%2C29%2C11%2C26%2C36%2C14%2C60100&pageSize=100&pageNum=1&option=1", "parser": "sportybet"},
     "bangbet": {"platform": "public_rest", "url": "https://bet-api.bangbet.com/api/bet/match/listTop?country=tz", "parser": "bangbet"},
-    "sportpesa": {"platform": "public_rest", "url": "https://www.sportpesa.co.tz/api/upcoming/games?sportId=1", "parser": "sportpesa"},
     "leonbet": {"platform": "public_rest", "url": "https://leonbet.co.tz/api-2/betline/events/all?ctag=en-US", "parser": "leonbet"},
-    "premierbet": {"platform": "public_rest", "url": "https://sports-api.premierbet.co.tz/v1/events/highlights?country=TZ&group=g2&platform=desktop&locale=en&sportId=1&limit=50", "parser": "premierbet"},
-    "mozzartbet": {"platform": "public_rest", "url": "https://www.mozzartbet.co.tz/backend/odds/getMatches", "parser": "mozzartbet"},
-    "betpawa": {"platform": "public_rest", "url": "https://www.betpawa.co.tz/api/pawa/v1/events", "parser": "generic"},
-    "888bet": {"platform": "public_rest", "url": "https://888bet.co.tz/api/v1/events/highlights", "parser": "generic"},
-    "wasafibet": {"platform": "public_rest", "url": "https://wasafibet.co.tz/api/v1/sportsbook/highlights", "parser": "generic"},
-    "pmbet": {"platform": "public_rest", "url": "https://pmbet.co.tz/api/v1/events", "parser": "generic"},
-    "odibets": {"platform": "public_rest", "url": "https://odibets.co.tz/api/v1/matches", "parser": "odibets"},
-    "1win": {"platform": "public_rest", "url": "https://1win.co.tz/api/v1/sports/football", "parser": "generic"},
-    "mostbet": {"platform": "public_rest", "url": "https://mostbet.co.tz/api/v1/events", "parser": "generic"},
-    "thronebet": {"platform": "public_rest", "url": "https://thronebet.co.tz/api/v1/events", "parser": "generic"},
-    "winprincess": {"platform": "public_rest", "url": "https://winprincess.co.tz/api/v1/sportsbook", "parser": "generic"},
-    "playmaster": {"platform": "public_rest", "url": "https://playmaster.co.tz/api/v1/events", "parser": "generic"},
-    "kingbet": {"platform": "public_rest", "url": "https://kingbet.co.tz/api/v1/events", "parser": "generic"},
-    "betafriq": {"platform": "public_rest", "url": "https://betafriq.co.tz/api/v1/sportsbook", "parser": "generic"},
-    "10bet": {"platform": "public_rest", "url": "https://10bet.co.tz/api/v1/events", "parser": "generic"},
-    "mbet": {"platform": "public_rest", "url": "https://mbet.co.tz/api/v1/sportsbook/matches", "parser": "generic"},
+    "premierbet": {"platform": "public_rest", "url": "https://sports-api.premierbet.co.tz/v1/events/highlights?country=TZ&group=g2&platform=desktop&locale=sw&sportId=1&limit=50", "parser": "premierbet"},
+    "mbet": {"platform": "public_rest", "url": "https://mbet.co.tz/api/v1/sportsbook/matches", "parser": "generic", "verify_ssl": False},
 
-    # 1XCorp Platform Engine — reverted to Playwright interception.
-    # Direct REST calls confirmed hitting the same JS-challenge shell
-    # ("window.cdn={cdnURL:'https://v3.traincdn.com'...") that was already
-    # diagnosed weeks ago; only a real browser can get past it.
-    "1xbet": {"platform": "playwright_spa", "url": "https://1xbet.co.tz/en/line/football", "keywords": ["/linefeed/", "get1x2", "linezip", "/bff-api/web/", "getclubslinezip"], "parser": "1xcorp"},
-    "betwinner": {"platform": "playwright_spa", "url": "https://betwinner.co.tz/en/line/football", "keywords": ["/linefeed/", "get1x2", "linezip", "/bff-api/web/", "getclubslinezip"], "parser": "1xcorp"},
-    "helabet": {"platform": "playwright_spa", "url": "https://helabet.co.tz/en/line/football", "keywords": ["/linefeed/", "get1x2", "linezip", "/bff-api/web/", "getclubslinezip"], "parser": "1xcorp"},
-    "1xbit": {"platform": "playwright_spa", "url": "https://1xbit.com/en/line/football", "keywords": ["/linefeed/", "get1x2", "linezip", "/bff-api/web/", "getclubslinezip"], "parser": "1xcorp"},
-    "megapari": {"platform": "playwright_spa", "url": "https://megapari.com/en/line/football", "keywords": ["/linefeed/", "get1x2", "linezip", "/bff-api/web/", "getclubslinezip"], "parser": "1xcorp"},
-    "22bet": {"platform": "playwright_spa", "url": "https://22bet.co.tz/en/line/football", "keywords": ["/linefeed/", "get1x2", "linezip", "/bff-api/web/", "getclubslinezip"], "parser": "1xcorp"},
-    "melbet": {"platform": "playwright_spa", "url": "https://melbet.co.tz/en/line/football", "keywords": ["/linefeed/", "get1x2", "linezip", "/bff-api/web/", "getclubslinezip"], "parser": "1xcorp"},
+    # Tier 2: Protected SPAs & 1XCorp Clones Routed via Patchright Stealth Interceptors
+    "1xbet": {"platform": "playwright_spa", "url": "https://1xbet.co.tz/en/line/football", "keywords": ["/linefeed/", "get1x2", "linezip", "/bff-api/web/", "zip", "expressday"], "parser": "1xcorp"},
+    "betwinner": {"platform": "playwright_spa", "url": "https://betwinner.co.tz/en/line/football", "keywords": ["/linefeed/", "get1x2", "linezip", "/bff-api/web/", "zip", "expressday"], "parser": "1xcorp"},
+    "helabet": {"platform": "playwright_spa", "url": "https://helabet.co.tz/en/line/football", "keywords": ["/linefeed/", "get1x2", "linezip", "/bff-api/web/", "zip", "expressday"], "parser": "1xcorp"},
+    "1xbit": {"platform": "playwright_spa", "url": "https://1xbit.com/en/line/football", "keywords": ["/linefeed/", "get1x2", "linezip", "/bff-api/web/", "zip", "expressday"], "parser": "1xcorp"},
+    "melbet": {"platform": "playwright_spa", "url": "https://melbet.co.tz/en/line/football", "keywords": ["/linefeed/", "get1x2", "linezip", "/bff-api/web/", "zip", "expressday"], "parser": "1xcorp"},
+    "22bet": {"platform": "playwright_spa", "url": "https://22bet.co.tz/en/line/football", "keywords": ["/linefeed/", "get1x2", "linezip", "/bff-api/web/", "zip", "expressday"], "parser": "1xcorp"},
+    "1win": {"platform": "playwright_spa", "url": "https://1win.co.tz", "keywords": ["/api/", "sports", "football"], "parser": "generic"},
+    "thronebet": {"platform": "playwright_spa", "url": "https://thronebet.co.tz/en/sportsbook", "keywords": ["/api/", "events", "highlights"], "parser": "generic"},
+    "meridianbet": {"platform": "playwright_spa", "url": "https://meridianbet.co.tz/en/betting/football", "keywords": ["/api/", "/events/", "v2", "betsapi", "standard", "games"], "parser": "meridianbet"},
+    "kingbet": {"platform": "playwright_spa", "url": "https://kingbet.co.tz/en/sportsbook", "keywords": ["/api/", "redis_data", "home", "events"], "parser": "generic"},
 
-    # MeridianBet — reverted to Playwright interception. Direct API still
-    # returns 403 even with matching Origin/Referer headers; likely needs a
-    # real browser session (cookies/JS challenge) that curl_cffi can't fake.
-    "meridianbet": {"platform": "playwright_spa", "url": "https://meridianbet.co.tz/en/betting/football", "keywords": ["/api/", "/events/", "betsapi", "standard", "v2"], "parser": "meridianbet"},
-
-    # Tier 2: Protected SPAs via Playwright Interceptors
-    "galsport": {"platform": "playwright_spa", "url": "https://gsb.co.tz/en/sportsbook/highlights", "keywords": ["/api/", "highlights", "events", "sportsbook"], "parser": "generic"},
-    "parimatch": {"platform": "playwright_spa", "url": "https://parimatch.co.tz/en/football", "keywords": ["prematch", "events", "sportsbook", "/api/"], "parser": "generic"},
-    "betway": {"platform": "playwright_spa", "url": "https://www.betway.co.tz/sport/soccer", "keywords": ["highlights", "sportsapi", "event"], "parser": "generic"},
-    "sokabet": {"platform": "playwright_spa", "url": "https://sokabet.co.tz", "keywords": ["api", "events", "highlights"], "parser": "generic"},
+    # Interceptor SPAs
+    "galsport": {"platform": "playwright_spa", "url": "https://gsb.co.tz/en/sportsbook/highlights", "keywords": ["/api/", "highlights", "events", "sportsbook", "get", "fixtures", "evapi"], "parser": "generic"},
+    "parimatch": {"platform": "playwright_spa", "url": "https://parimatch.co.tz/en/football", "keywords": ["prematch", "events", "sportsbook", "/api/", "line"], "parser": "generic"},
+    "betway": {"platform": "playwright_spa", "url": "https://www.betway.co.tz/sport/soccer", "keywords": ["highlights", "sportsapi", "event", "betbook"], "parser": "generic"},
+    "sokabet": {"platform": "playwright_spa", "url": "https://sokabet.co.tz", "keywords": ["api", "events", "highlights", "GetTopEvents", "altenar"], "parser": "generic"},
 }
 
 BOOKMAKER_MAP = {bm: None for bm in BOOKMAKER_REGISTRY.keys()}
@@ -445,42 +390,16 @@ BOOKMAKER_MAP = {bm: None for bm in BOOKMAKER_REGISTRY.keys()}
 # PARSER ENGINE
 # -------------------------------------------------------------------
 
-def auto_detect_parser(payload: Any) -> str:
-    if isinstance(payload, dict):
-        if "Value" in payload or "LE" in payload: return "1xcorp"
-        if "home_team" in payload or "home_odd" in payload: return "betika"
-        if "matches" in payload and isinstance(payload.get("matches"), list):
-            sample = payload["matches"][0] if payload["matches"] else {}
-            if "homeTeamName" in sample or "specialOdds" in sample:
-                return "mozzartbet"
-            if "home" in sample and "away" in sample and "odds" in sample:
-                return "odibets"
-        data_obj = payload.get("data")
-        if isinstance(data_obj, dict):
-            if "tournaments" in data_obj: return "sportybet"
-            if "groupList" in data_obj or "matchVoList" in data_obj: return "bangbet"
-            if "categories" in data_obj: return "premierbet"
-        if "events" in payload:
-            sample_ev = payload.get("events", [{}])
-            if isinstance(sample_ev, list) and len(sample_ev) > 0 and isinstance(sample_ev[0], dict):
-                if "homeTeam" in sample_ev[0] or "markets" in sample_ev[0]:
-                    return "meridianbet" if "homeTeam" in sample_ev[0] else "leonbet"
-            return "leonbet"
-    return "generic"
-
-
 def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> List[Dict[str, Any]]:
     ts = int(time.time())
     config = BOOKMAKER_REGISTRY.get(bookmaker_id, {})
-    parser_type = config.get("parser")
-
-    detected = auto_detect_parser(payload)
-    if detected != "generic":
-        parser_type = detected
-
+    parser_type = config.get("parser", "generic")
     raw_parsed = []
 
     try:
+        if not isinstance(payload, (dict, list)):
+            return []
+
         # 1. 1XCORP CLONES
         if parser_type == "1xcorp":
             val = payload.get("Value", []) if isinstance(payload, dict) else []
@@ -512,91 +431,7 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
                         "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
                     })
 
-        # 2. MERIDIANBET DIRECT
-        elif parser_type == "meridianbet":
-            events = payload.get("events", []) if isinstance(payload, dict) else (payload if isinstance(payload, list) else [])
-            for item in events:
-                if isinstance(item, dict):
-                    home = extract_team_name(item.get("homeTeam", {}).get("name") if isinstance(item.get("homeTeam"), dict) else item.get("homeTeam"))
-                    away = extract_team_name(item.get("awayTeam", {}).get("name") if isinstance(item.get("awayTeam"), dict) else item.get("awayTeam"))
-                    comp = str(item.get("league", {}).get("name") if isinstance(item.get("league"), dict) else (item.get("competition") or "Soccer"))
-
-                    o1, oX, o2 = None, None, None
-                    markets = item.get("markets", [])
-                    if isinstance(markets, list) and len(markets) > 0:
-                        selections = markets[0].get("selections", []) or markets[0].get("outcomes", [])
-                        if isinstance(selections, list):
-                            for sel in selections:
-                                if isinstance(sel, dict):
-                                    sel_name = str(sel.get("name") or sel.get("type", "")).upper()
-                                    price = safe_float(sel.get("price") or sel.get("odds"))
-                                    if sel_name in ["1", "HOME"]: o1 = price
-                                    elif sel_name in ["X", "DRAW"]: oX = price
-                                    elif sel_name in ["2", "AWAY"]: o2 = price
-
-                    raw_parsed.append({
-                        "match_id": str(item.get("id") or ""),
-                        "home_team": home, "away_team": away,
-                        "competition": comp,
-                        "home_odds": o1, "draw_odds": oX, "away_odds": o2,
-                        "sport": "soccer", "market_type": "1X2",
-                        "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
-                    })
-
-        # 3. MOZZARTBET PARSER
-        elif parser_type == "mozzartbet":
-            matches = payload.get("matches", []) if isinstance(payload, dict) else []
-            for item in matches:
-                if isinstance(item, dict):
-                    home = extract_team_name(item.get("homeTeamName") or item.get("home"))
-                    away = extract_team_name(item.get("visitorTeamName") or item.get("away"))
-                    comp = str(item.get("competitionName") or "Unknown")
-
-                    o1, oX, o2 = None, None, None
-                    special_odds = item.get("specialOdds") or item.get("odds") or []
-                    if isinstance(special_odds, list):
-                        for sub_odd in special_odds:
-                            if isinstance(sub_odd, dict):
-                                sub_type = str(sub_odd.get("subType", "")).upper()
-                                value = safe_float(sub_odd.get("value") or sub_odd.get("odd"))
-                                if sub_type in ["1", "HOME", "K1"]: o1 = value
-                                elif sub_type in ["X", "DRAW", "X1"]: oX = value
-                                elif sub_type in ["2", "AWAY", "K2"]: o2 = value
-
-                    raw_parsed.append({
-                        "match_id": str(item.get("id") or ""),
-                        "home_team": home, "away_team": away,
-                        "competition": comp,
-                        "home_odds": o1, "draw_odds": oX, "away_odds": o2,
-                        "sport": "soccer", "market_type": "1X2",
-                        "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
-                    })
-
-        # 4. ODIBETS PARSER
-        elif parser_type == "odibets":
-            matches = payload.get("matches", []) if isinstance(payload, dict) else (payload if isinstance(payload, list) else [])
-            for item in matches:
-                if isinstance(item, dict):
-                    home = extract_team_name(item.get("home") or item.get("home_team"))
-                    away = extract_team_name(item.get("away") or item.get("away_team"))
-                    comp = str(item.get("parent_match_name") or item.get("league") or "Unknown")
-
-                    o1, oX, o2 = None, None, None
-                    odds = item.get("odds", {}) if isinstance(item.get("odds"), dict) else {}
-                    o1 = safe_float(odds.get("1") or odds.get("home"))
-                    oX = safe_float(odds.get("X") or odds.get("draw"))
-                    o2 = safe_float(odds.get("2") or odds.get("away"))
-
-                    raw_parsed.append({
-                        "match_id": str(item.get("id") or item.get("match_id") or ""),
-                        "home_team": home, "away_team": away,
-                        "competition": comp,
-                        "home_odds": o1, "draw_odds": oX, "away_odds": o2,
-                        "sport": "soccer", "market_type": "1X2",
-                        "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
-                    })
-
-        # 5. BETIKA
+        # 2. BETIKA
         elif parser_type == "betika":
             events = payload.get("data", []) if isinstance(payload, dict) else (payload if isinstance(payload, list) else [])
             for item in events:
@@ -613,7 +448,7 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
                         "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
                     })
 
-        # 6. LEONBET
+        # 3. LEONBET
         elif parser_type == "leonbet":
             events = payload.get("events", []) if isinstance(payload, dict) else []
             for item in events:
@@ -666,7 +501,7 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
                             "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
                         })
 
-        # 7. PREMIERBET
+        # 4. PREMIERBET
         elif parser_type == "premierbet":
             categories = payload.get("data", {}).get("categories", []) if isinstance(payload, dict) and isinstance(payload.get("data"), dict) else []
             for cat in categories:
@@ -716,7 +551,7 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
                                         "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
                                     })
 
-        # 8. BANGBET
+        # 5. BANGBET
         elif parser_type == "bangbet":
             groups = payload.get("data", {}).get("groupList", []) if isinstance(payload, dict) and isinstance(payload.get("data"), dict) else []
             for group in groups:
@@ -766,7 +601,7 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
                                 "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
                             })
 
-        # 9. SPORTYBET
+        # 6. SPORTYBET
         elif parser_type == "sportybet":
             data_obj = payload.get("data", {}) if isinstance(payload, dict) else {}
             tournaments = data_obj.get("tournaments", []) or data_obj.get("events", []) if isinstance(data_obj, dict) else []
@@ -801,41 +636,7 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
                                 "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
                             })
 
-        # 10. SPORTPESA
-        elif parser_type == "sportpesa":
-            games = payload if isinstance(payload, list) else (payload.get("data") or payload.get("games") or payload.get("events") or []) if isinstance(payload, dict) else []
-            for item in games:
-                if isinstance(item, dict):
-                    home = extract_team_name(item.get("homeTeam") or item.get("home_team"))
-                    away = extract_team_name(item.get("awayTeam") or item.get("away_team"))
-                    o1, oX, o2 = None, None, None
-                    markets = item.get("markets") or item.get("marketsList") or []
-                    if isinstance(markets, list):
-                        for market in markets:
-                            if isinstance(market, dict):
-                                m_id = str(market.get("id") or "")
-                                m_name = str(market.get("name", "")).upper()
-                                if m_id in ["10", "1"] or "1X2" in m_name or "3-WAY" in m_name:
-                                    selections = market.get("selections", [])
-                                    if isinstance(selections, list):
-                                        for sel in selections:
-                                            if isinstance(sel, dict):
-                                                sel_type = str(sel.get("type") or sel.get("name", "")).upper()
-                                                price = safe_float(sel.get("odds") or sel.get("price"))
-                                                if sel_type in ["1", "HOME"]: o1 = price
-                                                elif sel_type in ["X", "DRAW"]: oX = price
-                                                elif sel_type in ["2", "AWAY"]: o2 = price
-
-                    raw_parsed.append({
-                        "match_id": str(item.get("gameId") or item.get("id") or ""),
-                        "home_team": home, "away_team": away,
-                        "competition": str(item.get("competition", {}).get("name") if isinstance(item.get("competition"), dict) else (item.get("competition") or "Unknown")),
-                        "home_odds": o1, "draw_odds": oX, "away_odds": o2,
-                        "sport": "soccer", "market_type": "1X2",
-                        "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
-                    })
-
-        # 11. RECURSIVE GENERIC FALLBACK
+        # 7. RECURSIVE GENERIC FALLBACK
         else:
             events = find_events_recursive(payload)
             for item in events:
@@ -867,15 +668,6 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
             counts = Counter(m["sport"] for m in matches)
             breakdown = ", ".join(f"{sp}: {cnt}" for sp, cnt in counts.items())
             logger.info(f"[{bookmaker_id.upper()}] Parsed {len(matches)} valid matches ({breakdown})")
-        elif len(raw_parsed) > 0:
-            # Extracted items but every single one failed validation — this is
-            # almost always a schema-drift bug in this parser, not a real "no
-            # matches" situation. Log a sample so it's diagnosable from the
-            # deploy logs instead of failing silently.
-            logger.warning(
-                f"[{bookmaker_id.upper()}-VALIDATION-REJECT] Extracted {len(raw_parsed)} items, "
-                f"but 0 passed validate_match(). Sample: {raw_parsed[:1]}"
-            )
 
     except Exception as e:
         logger.error(f"[{bookmaker_id}] Parser Exception ({type(e).__name__}): {repr(e)}")
@@ -884,58 +676,37 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
 
 
 # -------------------------------------------------------------------
-# HARDENED HTTP FETCHER WITH FAST 404 EXIT
+# HARDENED HTTP FETCHER WITH INSTANT FAST EXIT
 # -------------------------------------------------------------------
 
-async def fetch_http_api(session: AsyncSession, bookmaker_id: str, config: dict, retries: int = 3) -> List[Dict[str, Any]]:
+async def fetch_http_api(session: AsyncSession, bookmaker_id: str, config: dict, retries: int = 1) -> List[Dict[str, Any]]:
     url = config["url"]
-    is_1xcorp = config.get("is_1xcorp", False)
-    is_meridian = config.get("is_meridian", False)
-    headers = get_dynamic_headers(url, is_1xcorp=is_1xcorp, is_meridian=is_meridian)
+    headers = get_dynamic_headers(url)
+    verify_ssl = config.get("verify_ssl", True)
 
     async with HTTP_SEMAPHORE:
         for attempt in range(retries):
             try:
-                res = await session.get(url, headers=headers, impersonate="chrome", timeout=10)
+                res = await session.get(url, headers=headers, impersonate="chrome", timeout=8, verify=verify_ssl)
                 
-                # Fast Exit on 404 Not Found
-                if res.status_code == 404:
-                    logger.warning(f"[{bookmaker_id.upper()}] 404 Not Found on {url}. Aborting retries immediately.")
+                # Fast exit on bad HTTP status
+                if res.status_code in [404, 401, 403, 502]:
+                    logger.warning(f"[{bookmaker_id.upper()}] Returned HTTP {res.status_code}")
                     return []
 
-                if bookmaker_id == "sportpesa":
-                    if res.status_code in [200, 203]:
-                        try:
-                            data_init = res.json()
-                            games_list = data_init if isinstance(data_init, list) else (data_init.get("data") or data_init.get("games") or data_init.get("items") or [])
-                            game_ids = [str(g.get("id") or g.get("gameId")) for g in games_list if isinstance(g, dict) and (g.get("id") or g.get("gameId"))][:30]
-                            
-                            if game_ids:
-                                markets_url = f"https://www.sportpesa.co.tz/api/games/markets?games={','.join(game_ids)}&markets=10"
-                                res_markets = await session.get(markets_url, headers=headers, impersonate="chrome", timeout=10)
-                                if res_markets.status_code in [200, 203]:
-                                    return parse_raw_payload(bookmaker_id, res_markets.json())
-                                else:
-                                    logger.warning(f"[SPORTPESA] Markets status {res_markets.status_code} (Attempt {attempt+1}/{retries})")
-                            else:
-                                logger.warning(f"[SPORTPESA] No game IDs found (Attempt {attempt+1}/{retries}). Highlights sample: {str(games_list)[:300]}")
-                        except Exception as parse_err:
-                            logger.warning(f"[SPORTPESA] JSON parse error: {parse_err} (Attempt {attempt+1}/{retries})")
-                    else:
-                        logger.warning(f"[SPORTPESA] Highlights status {res.status_code} (Attempt {attempt+1}/{retries})")
-                else:
-                    if res.status_code in [200, 203]:
-                        try:
-                            return parse_raw_payload(bookmaker_id, res.json())
-                        except Exception:
-                            preview = res.text[:200].replace("\n", " ")
-                            logger.warning(f"[{bookmaker_id.upper()}] Non-JSON body on HTTP {res.status_code}: {preview} (Attempt {attempt+1}/{retries})")
-                    else:
-                        logger.warning(f"[{bookmaker_id.upper()}] HTTP Status {res.status_code} (Attempt {attempt+1}/{retries})")
+                if res.status_code in [200, 203]:
+                    try:
+                        data = res.json()
+                        return parse_raw_payload(bookmaker_id, data)
+                    except Exception:
+                        logger.warning(f"[{bookmaker_id.upper()}] Non-JSON response")
+                        return []
             except Exception as e:
-                logger.error(f"[{bookmaker_id.upper()}] Fetch Exception: {repr(e)} (Attempt {attempt+1}/{retries})")
-            
-            await asyncio.sleep(1.0 * (attempt + 1))
+                err_msg = str(e)
+                if "11001" in err_msg or "resolve" in err_msg.lower() or "curl: (6)" in err_msg:
+                    logger.error(f"[{bookmaker_id.upper()}] DNS Lookup Failed for host")
+                    return []
+                logger.error(f"[{bookmaker_id.upper()}] Fetch Exception: {err_msg}")
     return []
 
 
@@ -968,12 +739,6 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
 
             page = await context.new_page()
 
-            if STEALTH_AVAILABLE:
-                try:
-                    await stealth_async(page)
-                except Exception as e:
-                    logger.warning(f"[{bm_label}-INTERCEPTOR] stealth_async failed to apply: {repr(e)}")
-
             async def block_unnecessary_resources(route):
                 if route.request.resource_type in ["image", "font", "media"]:
                     await route.abort()
@@ -1004,56 +769,24 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
 
             page.on("response", handle_response)
 
-            def handle_websocket(ws):
-                logger.info(f"[{bm_label}-WS-DISCOVERY] WebSocket opened: {ws.url}")
-
-                def handle_frame(payload):
-                    try:
-                        text = payload if isinstance(payload, str) else payload.decode("utf-8", errors="ignore")
-                    except Exception:
-                        return
-                    lowered = text.lower()
-                    if any(kw.lower() in lowered for kw in keywords) or "odds" in lowered or "match" in lowered:
-                        try:
-                            json_data = json.loads(text)
-                            captured_payloads.append((ws.url, json_data))
-                            logger.info(f"[{bm_label}-WS-CAPTURE] Captured JSON frame from {ws.url}")
-                        except Exception:
-                            pass
-
-                ws.on("framereceived", handle_frame)
-
-            page.on("websocket", handle_websocket)
-            logger.info(f"[{bm_label}-INTERCEPTOR] Navigating to {url}...")
-
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=12000)
-
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=6000)
-                except Exception:
-                    pass
-
                 await page.mouse.move(300, 400)
                 await page.evaluate("window.scrollBy(0, 500)")
-                await asyncio.sleep(1.0)
-                await page.evaluate("window.scrollBy(0, 800)")
-                await asyncio.sleep(3.0)
+                await asyncio.sleep(2.5)
             except Exception:
-                logger.warning(f"[{bm_label}-INTERCEPTOR] Navigation timeout warning, processing captured payloads...")
+                pass
 
             await page.close()
             await context.close()
 
             latency_ms = int((time.time() - start_t) * 1000)
-            logger.info(f"[{bm_label}-INTERCEPTOR] Captured {len(captured_payloads)} total network payloads.")
 
             for res_url, payload in captured_payloads:
                 parsed = parse_raw_payload(bookmaker_id, payload, latency_ms=latency_ms)
                 all_matches.extend(parsed)
 
             unique_matches = list({f"{m['bookmaker_id']}_{m['match_id']}": m for m in all_matches if isinstance(m, dict) and m.get("match_id")}.values()) if all_matches else []
-            logger.info(f"[{bm_label}-INTERCEPTOR] Parsed {len(unique_matches)} unique valid matches in {latency_ms}ms.")
             return unique_matches
 
         except Exception as e:
@@ -1078,7 +811,7 @@ async def scrape_all_sportsbooks() -> Dict[str, Any]:
             if isinstance(res, list):
                 all_matches.extend([x for x in res if isinstance(x, dict)])
 
-    # 2. Concurrent Playwright Interceptors with Anti-Detect Launch Flags
+    # 2. Concurrent Playwright Interceptors
     playwright_targets = {bm: cfg for bm, cfg in BOOKMAKER_REGISTRY.items() if cfg["platform"] == "playwright_spa"}
 
     try:
