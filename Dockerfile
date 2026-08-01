@@ -1,27 +1,24 @@
-# Use Microsoft's official pre-configured Playwright Python image (v1.44.0)
-FROM mcr.microsoft.com/playwright/python:v1.44.0-jammy
+FROM python:3.11-slim
+
+# 1. Install Linux system utilities required for git dependencies & Chromium OS libraries
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-ENV PYTHONUNBUFFERED=1
 
-# Copy requirements file first
+# 2. Copy and install Python requirements
 COPY requirements.txt .
-
-# Install Python dependencies (includes patchright from GitHub)
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Verify patchright is importable
-RUN python -c "import patchright; print('Patchright installed OK')"
+# 3. Downloads Patchright Chromium stealth binaries + Linux OS dependencies
+RUN python -m patchright install chromium --with-deps
 
-# Ensure Playwright browsers & dependencies are installed
-RUN playwright install --with-deps chromium
-
-# Run Patchright console script to install stealth Chromium
-RUN patchright install chromium --with-deps
-
-# Copy rest of application code
+# 4. Copy remaining application files
 COPY . .
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "info"]
+# 5. Start the FastAPI server using Uvicorn
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
