@@ -19,6 +19,13 @@ except ImportError:
     from playwright.async_api import async_playwright, Browser
     logger.warning("patchright not installed — falling back to plain playwright.")
 
+try:
+    from playwright_stealth import stealth_async
+    STEALTH_AVAILABLE = True
+except ImportError:
+    STEALTH_AVAILABLE = False
+    logger.warning("playwright-stealth not installed — Playwright interceptors will run without it (add 'playwright-stealth' to requirements.txt).")
+
 DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 
 REAL_BROWSER_HEADERS = {
@@ -407,17 +414,22 @@ BOOKMAKER_REGISTRY = {
     "10bet": {"platform": "public_rest", "url": "https://10bet.co.tz/api/v1/events", "parser": "generic"},
     "mbet": {"platform": "public_rest", "url": "https://mbet.co.tz/api/v1/sportsbook/matches", "parser": "generic"},
 
-    # 1XCorp Platform Engine (Requires XMLHttpRequest Headers)
-    "1xbet": {"platform": "public_rest", "url": "https://1xbet.co.tz/LineFeed/Get1x2_CompressZip?sports=1&count=50&lng=en&mode=4", "parser": "1xcorp", "is_1xcorp": True},
-    "betwinner": {"platform": "public_rest", "url": "https://betwinner.co.tz/LineFeed/Get1x2_CompressZip?sports=1&count=50&lng=en&mode=4", "parser": "1xcorp", "is_1xcorp": True},
-    "helabet": {"platform": "public_rest", "url": "https://helabet.co.tz/LineFeed/Get1x2_CompressZip?sports=1&count=50&lng=en&mode=4", "parser": "1xcorp", "is_1xcorp": True},
-    "1xbit": {"platform": "public_rest", "url": "https://1xbit.com/LineFeed/Get1x2_CompressZip?sports=1&count=50&lng=en&mode=4", "parser": "1xcorp", "is_1xcorp": True},
-    "megapari": {"platform": "public_rest", "url": "https://megapari.com/service-api/LineFeed/Get1x2_CompressZip?sports=1&count=50&lng=en&mode=4", "parser": "1xcorp", "is_1xcorp": True},
-    "22bet": {"platform": "public_rest", "url": "https://22bet.co.tz/service-api/LineFeed/Get1x2_CompressZip?sports=1&count=50&lng=en&mode=4", "parser": "1xcorp", "is_1xcorp": True},
-    "melbet": {"platform": "public_rest", "url": "https://melbet.co.tz/service-api/LineFeed/Get1x2_CompressZip?sports=1&count=50&lng=en&mode=4", "parser": "1xcorp", "is_1xcorp": True},
+    # 1XCorp Platform Engine — reverted to Playwright interception.
+    # Direct REST calls confirmed hitting the same JS-challenge shell
+    # ("window.cdn={cdnURL:'https://v3.traincdn.com'...") that was already
+    # diagnosed weeks ago; only a real browser can get past it.
+    "1xbet": {"platform": "playwright_spa", "url": "https://1xbet.co.tz/en/line/football", "keywords": ["/linefeed/", "get1x2", "linezip", "/bff-api/web/", "getclubslinezip"], "parser": "1xcorp"},
+    "betwinner": {"platform": "playwright_spa", "url": "https://betwinner.co.tz/en/line/football", "keywords": ["/linefeed/", "get1x2", "linezip", "/bff-api/web/", "getclubslinezip"], "parser": "1xcorp"},
+    "helabet": {"platform": "playwright_spa", "url": "https://helabet.co.tz/en/line/football", "keywords": ["/linefeed/", "get1x2", "linezip", "/bff-api/web/", "getclubslinezip"], "parser": "1xcorp"},
+    "1xbit": {"platform": "playwright_spa", "url": "https://1xbit.com/en/line/football", "keywords": ["/linefeed/", "get1x2", "linezip", "/bff-api/web/", "getclubslinezip"], "parser": "1xcorp"},
+    "megapari": {"platform": "playwright_spa", "url": "https://megapari.com/en/line/football", "keywords": ["/linefeed/", "get1x2", "linezip", "/bff-api/web/", "getclubslinezip"], "parser": "1xcorp"},
+    "22bet": {"platform": "playwright_spa", "url": "https://22bet.co.tz/en/line/football", "keywords": ["/linefeed/", "get1x2", "linezip", "/bff-api/web/", "getclubslinezip"], "parser": "1xcorp"},
+    "melbet": {"platform": "playwright_spa", "url": "https://melbet.co.tz/en/line/football", "keywords": ["/linefeed/", "get1x2", "linezip", "/bff-api/web/", "getclubslinezip"], "parser": "1xcorp"},
 
-    # MeridianBet Direct API
-    "meridianbet": {"platform": "public_rest", "url": "https://meridianbet.co.tz/api/v1/events/highlights?sportId=1", "parser": "meridianbet", "is_meridian": True},
+    # MeridianBet — reverted to Playwright interception. Direct API still
+    # returns 403 even with matching Origin/Referer headers; likely needs a
+    # real browser session (cookies/JS challenge) that curl_cffi can't fake.
+    "meridianbet": {"platform": "playwright_spa", "url": "https://meridianbet.co.tz/en/betting/football", "keywords": ["/api/", "/events/", "betsapi", "standard", "v2"], "parser": "meridianbet"},
 
     # Tier 2: Protected SPAs via Playwright Interceptors
     "galsport": {"platform": "playwright_spa", "url": "https://gsb.co.tz/en/sportsbook/highlights", "keywords": ["/api/", "highlights", "events", "sportsbook"], "parser": "generic"},
@@ -855,6 +867,15 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
             counts = Counter(m["sport"] for m in matches)
             breakdown = ", ".join(f"{sp}: {cnt}" for sp, cnt in counts.items())
             logger.info(f"[{bookmaker_id.upper()}] Parsed {len(matches)} valid matches ({breakdown})")
+        elif len(raw_parsed) > 0:
+            # Extracted items but every single one failed validation — this is
+            # almost always a schema-drift bug in this parser, not a real "no
+            # matches" situation. Log a sample so it's diagnosable from the
+            # deploy logs instead of failing silently.
+            logger.warning(
+                f"[{bookmaker_id.upper()}-VALIDATION-REJECT] Extracted {len(raw_parsed)} items, "
+                f"but 0 passed validate_match(). Sample: {raw_parsed[:1]}"
+            )
 
     except Exception as e:
         logger.error(f"[{bookmaker_id}] Parser Exception ({type(e).__name__}): {repr(e)}")
@@ -897,7 +918,7 @@ async def fetch_http_api(session: AsyncSession, bookmaker_id: str, config: dict,
                                 else:
                                     logger.warning(f"[SPORTPESA] Markets status {res_markets.status_code} (Attempt {attempt+1}/{retries})")
                             else:
-                                logger.warning(f"[SPORTPESA] No game IDs found (Attempt {attempt+1}/{retries})")
+                                logger.warning(f"[SPORTPESA] No game IDs found (Attempt {attempt+1}/{retries}). Highlights sample: {str(games_list)[:300]}")
                         except Exception as parse_err:
                             logger.warning(f"[SPORTPESA] JSON parse error: {parse_err} (Attempt {attempt+1}/{retries})")
                     else:
@@ -947,6 +968,12 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
 
             page = await context.new_page()
 
+            if STEALTH_AVAILABLE:
+                try:
+                    await stealth_async(page)
+                except Exception as e:
+                    logger.warning(f"[{bm_label}-INTERCEPTOR] stealth_async failed to apply: {repr(e)}")
+
             async def block_unnecessary_resources(route):
                 if route.request.resource_type in ["image", "font", "media"]:
                     await route.abort()
@@ -976,13 +1003,42 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
                                     captured_payloads.append((response.url, json_data))
 
             page.on("response", handle_response)
+
+            def handle_websocket(ws):
+                logger.info(f"[{bm_label}-WS-DISCOVERY] WebSocket opened: {ws.url}")
+
+                def handle_frame(payload):
+                    try:
+                        text = payload if isinstance(payload, str) else payload.decode("utf-8", errors="ignore")
+                    except Exception:
+                        return
+                    lowered = text.lower()
+                    if any(kw.lower() in lowered for kw in keywords) or "odds" in lowered or "match" in lowered:
+                        try:
+                            json_data = json.loads(text)
+                            captured_payloads.append((ws.url, json_data))
+                            logger.info(f"[{bm_label}-WS-CAPTURE] Captured JSON frame from {ws.url}")
+                        except Exception:
+                            pass
+
+                ws.on("framereceived", handle_frame)
+
+            page.on("websocket", handle_websocket)
             logger.info(f"[{bm_label}-INTERCEPTOR] Navigating to {url}...")
 
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=12000)
+
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=6000)
+                except Exception:
+                    pass
+
                 await page.mouse.move(300, 400)
                 await page.evaluate("window.scrollBy(0, 500)")
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(1.0)
+                await page.evaluate("window.scrollBy(0, 800)")
+                await asyncio.sleep(3.0)
             except Exception:
                 logger.warning(f"[{bm_label}-INTERCEPTOR] Navigation timeout warning, processing captured payloads...")
 
