@@ -364,14 +364,14 @@ BOOKMAKER_REGISTRY = {
     "premierbet": {"platform": "public_rest", "url": "https://sports-api.premierbet.co.tz/v1/events/highlights?country=TZ&group=g2&platform=desktop&locale=sw&sportId=1&limit=50", "parser": "premierbet", "timeout": 8},
     "22bet": {"platform": "public_rest", "url": "https://22bet.co.tz/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en_GB&gr=329&mode=4&country=181&partner=151", "parser": "1xcorp", "timeout": 10},
 
-    # SPA Targets via Stealth Playwright Interceptors (Refined Feed Keywords)
+    # SPA Targets via Stealth Playwright Interceptors
     "mbet": {"platform": "playwright_spa", "url": "https://mbet.co.tz", "keywords": ["/api/", "sportsbook", "matches", "events"], "parser": "generic"},
-    "1xbet": {"platform": "playwright_spa", "url": "https://1xbet.co.tz/en/line/football", "keywords": ["get1x2", "linefeed", "livefeed", "getevents", "getgames", "zip"], "parser": "1xcorp"},
-    "betwinner": {"platform": "playwright_spa", "url": "https://betwinner.co.tz/en/line/football", "keywords": ["get1x2", "linefeed", "livefeed", "getevents", "getgames", "zip"], "parser": "1xcorp"},
-    "helabet": {"platform": "playwright_spa", "url": "https://helabet.co.tz/en/line/football", "keywords": ["get1x2", "linefeed", "livefeed", "getevents", "getgames", "zip"], "parser": "1xcorp"},
-    "1xbit": {"platform": "playwright_spa", "url": "https://1xbit.com/en/line/football", "keywords": ["get1x2", "linefeed", "livefeed", "getevents", "getgames", "zip"], "parser": "1xcorp"},
-    "megapari": {"platform": "playwright_spa", "url": "https://megapari.com/en/line/football", "keywords": ["get1x2", "linefeed", "livefeed", "getevents", "getgames", "zip"], "parser": "1xcorp"},
-    "melbet": {"platform": "playwright_spa", "url": "https://melbet.co.tz/en/line/football", "keywords": ["get1x2", "linefeed", "livefeed", "getevents", "getgames", "zip"], "parser": "1xcorp"},
+    "1xbet": {"platform": "playwright_spa", "url": "https://1xbet.co.tz/en/line/football", "keywords": ["/bff-api/", "get1x2", "linefeed", "livefeed", "getevents", "getgames", "zip"], "parser": "1xcorp"},
+    "betwinner": {"platform": "playwright_spa", "url": "https://betwinner.co.tz/en/line/football", "keywords": ["/bff-api/", "get1x2", "linefeed", "livefeed", "getevents", "getgames", "zip"], "parser": "1xcorp"},
+    "helabet": {"platform": "playwright_spa", "url": "https://helabet.co.tz/en/line/football", "keywords": ["/bff-api/", "get1x2", "linefeed", "livefeed", "getevents", "getgames", "zip"], "parser": "1xcorp"},
+    "1xbit": {"platform": "playwright_spa", "url": "https://1xbit.com/en/line/football", "keywords": ["/bff-api/", "get1x2", "linefeed", "livefeed", "getevents", "getgames", "zip"], "parser": "1xcorp"},
+    "megapari": {"platform": "playwright_spa", "url": "https://megapari.com/en/line/football", "keywords": ["/bff-api/", "get1x2", "linefeed", "livefeed", "getevents", "getgames", "zip"], "parser": "1xcorp"},
+    "melbet": {"platform": "playwright_spa", "url": "https://melbet.co.tz/en/line/football", "keywords": ["/bff-api/", "get1x2", "linefeed", "livefeed", "getevents", "getgames", "zip"], "parser": "1xcorp"},
     "1win": {"platform": "playwright_spa", "url": "https://1win.co.tz", "keywords": ["/api/", "sports", "football", "matches"], "parser": "generic"},
     "thronebet": {"platform": "playwright_spa", "url": "https://thronebet.co.tz/en/sportsbook", "keywords": ["/api/", "events", "highlights"], "parser": "generic"},
     "meridianbet": {"platform": "playwright_spa", "url": "https://meridianbet.co.tz/en/betting/football", "keywords": ["/events/", "standard", "v2", "sports", "games"], "parser": "meridianbet"},
@@ -399,8 +399,8 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
         if not isinstance(payload, (dict, list)):
             return []
 
-        # Ignore UI Configuration dictionaries
-        if isinstance(payload, dict) and any(k.startswith("-") for k in payload.keys()):
+        # Ignore non-event UI configuration payloads
+        if isinstance(payload, dict) and any(str(k).startswith("-1") for k in payload.keys()):
             return []
 
         # 1. 1XCORP CLONES (22BET, 1XBET, BETWINNER, ETC.)
@@ -800,10 +800,10 @@ async def fetch_http_api(session: AsyncSession, bookmaker_id: str, config: dict,
 
 
 # -------------------------------------------------------------------
-# PLAYWRIGHT INTERCEPTOR WITH DETAILED SCHEMA LOGGING
+# PLAYWRIGHT INTERCEPTOR WITH EXTENDED INTERACTION
 # -------------------------------------------------------------------
 
-async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: dict, max_timeout: float = 12.0) -> List[Dict[str, Any]]:
+async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: dict, max_timeout: float = 15.0) -> List[Dict[str, Any]]:
     url = config["url"]
     keywords = config.get("keywords", [])
     bm_label = bookmaker_id.upper()
@@ -832,7 +832,7 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
                 if response.status in [200, 203]:
                     res_url = response.url.lower()
 
-                    if "growthbook" not in res_url and "analytics" not in res_url and "/config/" not in res_url:
+                    if "growthbook" not in res_url and "analytics" not in res_url:
                         if any(kw.lower() in res_url for kw in keywords):
                             json_data = None
                             try:
@@ -847,7 +847,6 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
                             if json_data:
                                 captured_payloads.append((response.url, json_data))
                                 
-                                # Log payload structure for debugging
                                 if isinstance(json_data, dict):
                                     top_keys = list(json_data.keys())[:15]
                                     logger.info(f"[{bm_label}-PAYLOAD] URL: {response.url} | Dict Keys: {top_keys}")
@@ -859,14 +858,11 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
 
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=12000)
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=8000)
-                except Exception:
-                    pass
                 
-                await page.mouse.move(300, 400)
-                await page.evaluate("window.scrollBy(0, 800)")
-                await asyncio.sleep(3.0)
+                # Active mouse movement & deep scroll to trigger lazy XHR requests
+                await page.mouse.move(400, 500)
+                await page.evaluate("window.scrollBy(0, 1200)")
+                await asyncio.sleep(5.0)
             except Exception:
                 pass
 
