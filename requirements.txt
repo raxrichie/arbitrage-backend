@@ -8,7 +8,9 @@ gunicorn==22.0.0
 # ============================
 # Browser Automation (Stealth)
 # ============================
-patchright @ git+https://github.com/raxrichie/patchright.git@main
+# patchright is published directly on PyPI — no need for a git fork.
+patchright
+playwright-stealth==1.0.6
 
 # ============================
 # HTTP Clients
