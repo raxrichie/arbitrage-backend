@@ -17,7 +17,7 @@ RUN python -c "import patchright; print('Patchright installed OK')"
 RUN playwright install --with-deps chromium
 
 # Run Patchright console script to install stealth Chromium
-RUN patchright
+RUN patchright install chromium --with-deps
 
 # Copy rest of application code
 COPY . .
