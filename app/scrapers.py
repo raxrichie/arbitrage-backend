@@ -11,7 +11,7 @@ from curl_cffi.requests import AsyncSession
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("scrapers")
 
-# Initialize Patchright Stealth Engine
+# Initialize Patchright Stealth Engine with Playwright Fallback
 try:
     from patchright.async_api import async_playwright, Browser
     logger.info("Using patchright for browser automation (stealth fork enabled).")
@@ -399,36 +399,56 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
         if not isinstance(payload, (dict, list)):
             return []
 
-        # 1. 1XCORP CLONES
+        # 1. 1XCORP CLONES (FLEXIBLE BROWSER INTERCEPTED PAYLOAD EXTRACTOR)
         if parser_type == "1xcorp":
-            val = payload.get("Value", []) if isinstance(payload, dict) else []
-            events = val.get("Events") or val.get("G") or val.get("Games") or val.get("E") or [] if isinstance(val, dict) else (val if isinstance(val, list) else [])
+            events = []
+            if isinstance(payload, list):
+                events = payload
+            elif isinstance(payload, dict):
+                val = payload.get("Value") or payload.get("data") or payload
+                if isinstance(val, dict):
+                    events = val.get("Events") or val.get("G") or val.get("Games") or val.get("E") or []
+                elif isinstance(val, list):
+                    events = val
 
             for item in events:
                 if isinstance(item, dict):
-                    home = extract_team_name(item.get("O1") or item.get("HT") or item.get("HomeTeam"))
-                    away = extract_team_name(item.get("O2") or item.get("AT") or item.get("AwayTeam"))
+                    home = extract_team_name(item.get("O1") or item.get("HT") or item.get("HomeTeam") or item.get("O1Name"))
+                    away = extract_team_name(item.get("O2") or item.get("AT") or item.get("AwayTeam") or item.get("O2Name"))
                     
+                    if not home or not away:
+                        raw_name = str(item.get("N") or item.get("Name") or "")
+                        if " - " in raw_name:
+                            parts = raw_name.split(" - ", 1)
+                            home, away = parts[0].strip(), parts[1].strip()
+                        elif " vs " in raw_name.lower():
+                            parts = raw_name.lower().split(" vs ", 1)
+                            home, away = parts[0].strip(), parts[1].strip()
+
                     raw_sport_id = item.get("SI") or item.get("SportId") or item.get("SN")
                     detected_sport = resolve_sport_name(raw_sport_id)
-                    competition = str(item.get("LE") or item.get("League") or "Unknown")
+                    competition = str(item.get("LE") or item.get("League") or item.get("L") or "Unknown")
 
                     o1, oX, o2 = None, None, None
-                    for outcome in item.get("E", []):
-                        if isinstance(outcome, dict):
-                            t = outcome.get("T")
-                            if t == 1: o1 = safe_float(outcome.get("C"))
-                            elif t == 2: oX = safe_float(outcome.get("C"))
-                            elif t == 3: o2 = safe_float(outcome.get("C"))
+                    outcomes = item.get("E") or item.get("Events") or item.get("Markets") or []
+                    if isinstance(outcomes, list):
+                        for outcome in outcomes:
+                            if isinstance(outcome, dict):
+                                t = outcome.get("T") or outcome.get("Type")
+                                price = safe_float(outcome.get("C") or outcome.get("Coef") or outcome.get("Price"))
+                                if t == 1: o1 = price
+                                elif t == 2: oX = price
+                                elif t == 3: o2 = price
 
-                    raw_parsed.append({
-                        "match_id": str(item.get("I") or item.get("ID") or ""),
-                        "home_team": home, "away_team": away,
-                        "competition": competition,
-                        "home_odds": o1, "draw_odds": oX, "away_odds": o2,
-                        "sport": detected_sport, "market_type": "1X2" if oX is not None else "2WAY",
-                        "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
-                    })
+                    if home and away:
+                        raw_parsed.append({
+                            "match_id": str(item.get("I") or item.get("ID") or item.get("Ci") or ""),
+                            "home_team": home, "away_team": away,
+                            "competition": competition,
+                            "home_odds": o1, "draw_odds": oX, "away_odds": o2,
+                            "sport": detected_sport, "market_type": "1X2" if oX is not None else "2WAY",
+                            "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
+                        })
 
         # 2. BETIKA
         elif parser_type == "betika":
