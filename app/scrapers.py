@@ -362,7 +362,7 @@ BOOKMAKER_REGISTRY = {
     "bangbet": {"platform": "public_rest", "url": "https://bet-api.bangbet.com/api/bet/match/listTop?country=tz", "parser": "bangbet", "timeout": 8},
     "leonbet": {"platform": "public_rest", "url": "https://leonbet.co.tz/api-2/betline/events/all?ctag=en-US", "parser": "leonbet", "timeout": 25},
     "premierbet": {"platform": "public_rest", "url": "https://sports-api.premierbet.co.tz/v1/events/highlights?country=TZ&group=g2&platform=desktop&locale=sw&limit=100", "parser": "premierbet", "timeout": 8},
-    "meridianbet": {"platform": "public_rest", "url": "https://online.meridianbet.co.tz/api/v2/events/standard", "parser": "meridianbet", "timeout": 10},
+    "meridianbet": {"platform": "playwright_spa", "url": "https://meridianbet.co.tz/en/betting/football", "keywords": ["/api/", "/events/", "betsapi", "standard", "v2"], "parser": "meridianbet"},
 
     # ALL 1XCORP CLONES BROAD MULTI-SPORT FEEDS
     "22bet": {"platform": "public_rest", "url": "https://22bet.co.tz/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en_GB&gr=329&mode=4&country=181&partner=151", "parser": "1xcorp", "timeout": 10},
@@ -763,6 +763,11 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
             counts = Counter(m["sport"] for m in matches)
             breakdown = ", ".join(f"{sp}: {cnt}" for sp, cnt in counts.items())
             logger.info(f"[{bookmaker_id.upper()}] Parsed {len(matches)} valid matches ({breakdown})")
+        elif len(raw_parsed) > 0:
+            logger.warning(
+                f"[{bookmaker_id.upper()}-VALIDATION-REJECT] Extracted {len(raw_parsed)} items, "
+                f"but 0 passed validate_match(). Sample: {raw_parsed[:1]}"
+            )
 
     except Exception as e:
         logger.error(f"[{bookmaker_id}] Parser Exception ({type(e).__name__}): {repr(e)}")
@@ -816,6 +821,7 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
     bm_label = bookmaker_id.upper()
     captured_payloads = []
     all_matches = []
+    all_response_urls = []
 
     async with PLAYWRIGHT_SEMAPHORE:
         start_t = time.time()
@@ -838,6 +844,10 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
             async def handle_response(response):
                 if response.status in [200, 203]:
                     res_url = response.url.lower()
+                    content_type = response.headers.get("content-type", "")
+
+                    if not any(ext in res_url for ext in [".css", ".png", ".jpg", ".jpeg", ".svg", ".woff", ".ico", ".gif"]):
+                        all_response_urls.append(f"{res_url} [{content_type}]")
 
                     if "growthbook" not in res_url and "analytics" not in res_url and "/config/" not in res_url:
                         if any(kw.lower() in res_url for kw in keywords):
@@ -890,6 +900,14 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
 
             unique_matches = list({f"{m['bookmaker_id']}_{m['match_id']}": m for m in all_matches if isinstance(m, dict) and m.get("match_id")}.values()) if all_matches else []
             logger.info(f"[{bm_label}-SUMMARY] Captured {len(captured_payloads)} total payloads, parsed {len(unique_matches)} unique matches.")
+
+            if len(captured_payloads) == 0:
+                sample = all_response_urls[:25]
+                logger.warning(
+                    f"[{bm_label}-NO-MATCH-DEBUG] 0 keyword matches. Saw {len(all_response_urls)} "
+                    f"total non-static responses. Sample: {sample}"
+                )
+
             return unique_matches
 
         except Exception as e:
