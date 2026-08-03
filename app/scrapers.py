@@ -1,9 +1,12 @@
 import asyncio
-import logging
-import time
 import json
+import logging
+import os
+import re
+import time
+import zlib
 from collections import Counter
-from typing import Dict, List, Any, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 from curl_cffi.requests import AsyncSession
@@ -11,12 +14,27 @@ from curl_cffi.requests import AsyncSession
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("scrapers")
 
-# Initialize Patchright Stealth Engine
+# Feature Flags & Cache Configuration
+NETWORK_RECORDER = os.getenv("NETWORK_RECORDER", "false").lower() == "true"
+SAVE_DIAGNOSTICS = os.getenv("SAVE_DIAGNOSTICS", "false").lower() == "true"
+DIAGNOSTICS_DIR = "diagnostics"
+CACHE_FILE = "endpoints_cache.json"
+
+if SAVE_DIAGNOSTICS and not os.path.exists(DIAGNOSTICS_DIR):
+    os.makedirs(DIAGNOSTICS_DIR, exist_ok=True)
+
+# Ignore infrastructure endpoints before payload scoring
+IGNORE_JSON_KEYWORDS = (
+    "growthbook", "analytics", "geo-location", "config", "translations",
+    "feature", "consent", "cookies", "telemetry", "google-analytics", "facebook"
+)
+
+# Stealth browser patchright initialization
 try:
-    from patchright.async_api import async_playwright, Browser
+    from patchright.async_api import Browser, async_playwright
     logger.info("Using patchright for browser automation (stealth fork enabled).")
 except ImportError:
-    from playwright.async_api import async_playwright, Browser
+    from playwright.async_api import Browser, async_playwright
     logger.warning("patchright not installed — falling back to plain playwright.")
 
 DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
@@ -54,6 +72,38 @@ SPORT_MAP = {
 HTTP_SEMAPHORE = asyncio.Semaphore(16)
 PLAYWRIGHT_SEMAPHORE = asyncio.Semaphore(2)
 
+
+# -------------------------------------------------------------------
+# ENDPOINT DISCOVERY CACHE ENGINE
+# -------------------------------------------------------------------
+
+def load_endpoint_cache() -> Dict[str, Any]:
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def update_endpoint_cache(bookmaker_id: str, endpoint_url: str, score: int):
+    cache = load_endpoint_cache()
+    cache[bookmaker_id] = {
+        "endpoint": endpoint_url,
+        "last_verified": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "score": score
+    }
+    try:
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=2)
+        logger.info(f"[{bookmaker_id.upper()}-CACHE-UPDATED] Saved endpoint: {endpoint_url}")
+    except Exception as e:
+        logger.error(f"[{bookmaker_id.upper()}-CACHE-ERROR] Failed to save endpoint cache: {repr(e)}")
+
+
+# -------------------------------------------------------------------
+# UTILITY FUNCTIONS & STRUCTURAL SCORING
+# -------------------------------------------------------------------
 
 def resolve_sport_name(raw_val: Any) -> str:
     if not raw_val:
@@ -154,6 +204,45 @@ def validate_match(match: Dict[str, Any]) -> bool:
         return len(valid_odds) >= 2 and oX is not None
 
 
+def score_sportsbook_payload(obj: Any) -> int:
+    score = 0
+    obj_str = str(obj).lower()
+
+    keywords = ["home_team", "away_team", "competitors", "eventnames", "odds", "markets", "outcomes", "1x2", "coef", "runners"]
+    for kw in keywords:
+        score += obj_str.count(kw)
+
+    if isinstance(obj, (dict, list)):
+        events = find_events_recursive(obj)
+        score += len(events) * 5
+
+    return score
+
+
+def extract_ssr_hydration_json(html_content: str) -> List[Dict[str, Any]]:
+    """Extracts and parses SSR hydration objects directly out of the DOM."""
+    found_payloads = []
+    ssr_patterns = [
+        r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+        r'<script[^>]*id="__NUXT__"[^>]*>(.*?)</script>',
+        r'window\.__INITIAL_STATE__\s*=\s*({.*?});',
+        r'window\.__PRELOADED_STATE__\s*=\s*({.*?});',
+        r'window\.__APOLLO_STATE__\s*=\s*({.*?});'
+    ]
+
+    for pattern in ssr_patterns:
+        matches = re.findall(pattern, html_content, re.DOTALL)
+        for match in matches:
+            try:
+                data = json.loads(match.strip())
+                if score_sportsbook_payload(data) > 10:
+                    found_payloads.append(data)
+            except Exception:
+                pass
+
+    return found_payloads
+
+
 def find_events_recursive(obj: Any, depth: int = 0) -> List[Dict[str, Any]]:
     if depth > 4:
         return []
@@ -233,7 +322,7 @@ def find_arbitrage_opportunities(all_matches: List[Dict[str, Any]], bankroll: fl
         if not o1 or not o2:
             continue
 
-        # 1. 2-WAY ARBITRAGE (TENNIS, BASKETBALL, VOLLEYBALL, MMA, TABLE TENNIS, HANDBALL)
+        # 1. 2-WAY ARBITRAGE
         if sport in ["tennis", "basketball", "volleyball", "mma", "table_tennis", "baseball", "darts", "handball"]:
             if str(best_home.get("bookmaker_id")) == str(best_away.get("bookmaker_id")):
                 continue
@@ -279,7 +368,7 @@ def find_arbitrage_opportunities(all_matches: List[Dict[str, Any]], bankroll: fl
                     ]
                 })
 
-        # 2. 3-WAY ARBITRAGE (SOCCER)
+        # 2. 3-WAY ARBITRAGE
         else:
             best_draw = max([m for m in valid_matches if m.get("draw_odds") is not None], key=lambda x: x.get("draw_odds") or 0, default=None)
             if not best_draw:
@@ -352,33 +441,33 @@ def find_arbitrage_opportunities(all_matches: List[Dict[str, Any]], bankroll: fl
 
 
 # -------------------------------------------------------------------
-# BROAD MULTI-SPORT BOOKMAKER REGISTRY
+# BOOKMAKER REGISTRY
 # -------------------------------------------------------------------
 
 BOOKMAKER_REGISTRY = {
-    # Direct Public REST APIs (Ultra-Fast Engine)
+    # Direct Public REST APIs
     "betika": {"platform": "public_rest", "url": "https://api.betika.com/v1/uo/matches?limit=100&sub_type=prematch", "parser": "betika", "timeout": 8},
     "sportybet": {"platform": "public_rest", "url": "https://www.sportybet.com/api/tz/factsCenter/pcUpcomingEvents?pageSize=100&pageNum=1&option=1", "parser": "sportybet", "timeout": 8},
     "bangbet": {"platform": "public_rest", "url": "https://bet-api.bangbet.com/api/bet/match/listTop?country=tz", "parser": "bangbet", "timeout": 8},
     "leonbet": {"platform": "public_rest", "url": "https://leonbet.co.tz/api-2/betline/events/all?ctag=en-US", "parser": "leonbet", "timeout": 25},
     "premierbet": {"platform": "public_rest", "url": "https://sports-api.premierbet.co.tz/v1/events/highlights?country=TZ&group=g2&platform=desktop&locale=sw&limit=100", "parser": "premierbet", "timeout": 8},
-    "kingbet": {"platform": "public_rest", "url": "https://www.kingbet.co.tz/api/redis_data/home", "parser": "generic", "timeout": 10},
 
-    # ALL 1XCORP CLONES BROAD MULTI-SPORT FEEDS (Direct REST)
+    # ALL 1XCORP CLONES (Direct REST)
     "22bet": {"platform": "public_rest", "url": "https://22bet.co.tz/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en_GB&gr=329&mode=4&country=181&partner=151", "parser": "1xcorp", "timeout": 10},
     "helabet": {"platform": "public_rest", "url": "https://helabet.co.tz/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en&gr=329&mode=4&country=181&partner=237", "parser": "1xcorp", "timeout": 10},
     "betwinner": {"platform": "public_rest", "url": "https://betwinner.co.tz/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en&gr=329&mode=4&country=181&partner=777", "parser": "1xcorp", "timeout": 10},
     "1xbet": {"platform": "public_rest", "url": "https://1xbet.co.tz/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en&gr=329&mode=4&country=181&partner=1499", "parser": "1xcorp", "timeout": 10},
     "1xbit": {"platform": "public_rest", "url": "https://1xbit.com/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en&gr=329&mode=4&country=181&partner=933", "parser": "1xcorp", "timeout": 10},
     "megapari": {"platform": "public_rest", "url": "https://megapari.com/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en&gr=329&mode=4&country=181&partner=824", "parser": "1xcorp", "timeout": 10},
-    "melbet": {"platform": "public_rest", "url": "https://melbet.co.tz/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en&gr=329&mode=4&country=181&partner=195", "parser": "1xcorp", "timeout": 10},
+    "melbet": {"platform": "public_rest", "url": "https://melbet.co.tz/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en&gr=329&mode=4&country=181&partner=1", "parser": "1xcorp", "timeout": 10},
 
     # Non-1XCorp SPA Targets via Stealth Playwright Interceptors
     "meridianbet": {"platform": "playwright_spa", "url": "https://meridianbet.co.tz/en/betting/football", "keywords": ["/api/", "/events/", "betsapi", "standard", "v2"], "parser": "meridianbet"},
     "mbet": {"platform": "playwright_spa", "url": "https://mbet.co.tz", "keywords": ["/api/", "sportsbook", "matches", "events"], "parser": "generic"},
     "1win": {"platform": "playwright_spa", "url": "https://1win.co.tz", "keywords": ["/api/", "sports", "football", "matches"], "parser": "generic"},
+    "kingbet": {"platform": "playwright_spa", "url": "https://www.kingbet.co.tz/en/sportsbook/highlights", "keywords": ["redis_data", "home", "events", "sportsbook"], "parser": "generic"},
     "galsport": {"platform": "playwright_spa", "url": "https://gsb.co.tz/en/sportsbook/highlights", "keywords": ["/api/", "highlights", "events", "sportsbook", "get", "fixtures", "evapi"], "parser": "generic"},
-    "parimatch": {"platform": "playwright_spa", "url": "https://parimatch.co.tz", "keywords": ["prematch", "sportsbook/desktop", "line/events"], "parser": "generic"},
+    "parimatch": {"platform": "playwright_spa", "url": "https://parimatch.co.tz/en/football/prematch", "keywords": ["prematch", "sportsbook", "events", "line"], "parser": "generic"},
     "betway": {"platform": "playwright_spa", "url": "https://www.betway.co.tz", "keywords": ["highlights", "sportsapi", "event", "betbook"], "parser": "generic"},
     "sokabet": {"platform": "playwright_spa", "url": "https://sokabet.co.tz", "keywords": ["api", "events", "highlights", "GetTopEvents", "altenar"], "parser": "generic"},
 }
@@ -762,7 +851,7 @@ def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> L
             counts = Counter(m["sport"] for m in matches)
             breakdown = ", ".join(f"{sp}: {cnt}" for sp, cnt in counts.items())
             logger.info(f"[{bookmaker_id.upper()}] Parsed {len(matches)} valid matches ({breakdown})")
-        elif len(raw_parsed) > 0:
+        elif len(raw_parsed) > 0 and NETWORK_RECORDER:
             logger.warning(
                 f"[{bookmaker_id.upper()}-VALIDATION-REJECT] Extracted {len(raw_parsed)} items, "
                 f"but 0 passed validate_match(). Sample: {raw_parsed[:1]}"
@@ -789,7 +878,6 @@ async def fetch_http_api(session: AsyncSession, bookmaker_id: str, config: dict,
             try:
                 res = await session.get(url, headers=headers, impersonate="chrome", timeout=timeout, verify=verify_ssl)
                 
-                # Fast exit on bad HTTP status
                 if res.status_code in [404, 401, 403, 502]:
                     logger.warning(f"[{bookmaker_id.upper()}] Returned HTTP {res.status_code}")
                     return []
@@ -811,19 +899,27 @@ async def fetch_http_api(session: AsyncSession, bookmaker_id: str, config: dict,
 
 
 # -------------------------------------------------------------------
-# PLAYWRIGHT INTERCEPTOR WITH EXTENDED INTERACTION & CONFIG FILTERING
+# ADVANCED PLAYWRIGHT INTERCEPTOR WITH CACHE & FORENSIC ARTIFACTS
 # -------------------------------------------------------------------
 
-async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: dict, max_timeout: float = 15.0) -> List[Dict[str, Any]]:
+async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: dict, max_timeout: float = 20.0) -> List[Dict[str, Any]]:
     url = config["url"]
     keywords = config.get("keywords", [])
     bm_label = bookmaker_id.upper()
     captured_payloads = []
     all_matches = []
-    all_response_urls = []
+    
+    # Forensic Stores
+    redirect_chain = []
+    requests_log = []
+    responses_log = []
+    websockets_log = []
+    json_candidates = []
 
     async with PLAYWRIGHT_SEMAPHORE:
         start_t = time.time()
+        context = None
+        page = None
         try:
             context = await browser.new_context(
                 user_agent=DESKTOP_USER_AGENT,
@@ -840,121 +936,234 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
 
             page = await context.new_page()
 
+            # 1. Track Timestamped Frame Navigations
+            page.on("framenavigated", lambda frame: redirect_chain.append({"time": round(time.time() - start_t, 2), "url": frame.url}) if (frame == page.main_frame) else None)
+
+            # 2. Track WebSockets
+            page.on("websocket", lambda ws: websockets_log.append(ws.url))
+
+            # 3. Route Interceptor with Method, Resource Type & Initiator
+            async def handle_route(route):
+                req = route.request
+                if req.resource_type in ("xhr", "fetch"):
+                    requests_log.append({
+                        "url": req.url,
+                        "method": req.method,
+                        "resource": req.resource_type,
+                        "frame": "main" if route.request.frame == page.main_frame else "subframe"
+                    })
+                await route.continue_()
+
+            await page.route("**/*", handle_route)
+
+            # 4. Filter Noise BEFORE Structural Scoring
             async def handle_response(response):
                 if response.status in [200, 203]:
                     res_url = response.url.lower()
                     content_type = response.headers.get("content-type", "")
 
+                    if any(x in res_url for x in IGNORE_JSON_KEYWORDS):
+                        return
+
+                    # Record Response Sizes
+                    try:
+                        content_length = int(response.headers.get("content-length", 0)) or len(await response.body())
+                    except Exception:
+                        content_length = 0
+
                     if not any(ext in res_url for ext in [".css", ".png", ".jpg", ".jpeg", ".svg", ".woff", ".ico", ".gif"]):
-                        all_response_urls.append(f"{res_url} [{content_type}]")
+                        responses_log.append({"url": response.url, "status": response.status, "content_type": content_type, "size_bytes": content_length})
 
-                    if "growthbook" not in res_url and "analytics" not in res_url and "/config/" not in res_url:
-                        if any(kw.lower() in res_url for kw in keywords):
-                            json_data = None
-                            try:
-                                json_data = await response.json()
-                            except Exception:
-                                try:
-                                    raw_text = await response.text()
-                                    json_data = json.loads(raw_text)
-                                except Exception:
-                                    pass
-
+                    if "json" in content_type:
+                        try:
+                            json_data = await response.json()
                             if json_data:
-                                captured_payloads.append((response.url, json_data))
-                                
-                                if isinstance(json_data, dict):
-                                    top_keys = list(json_data.keys())[:15]
-                                    logger.info(f"[{bm_label}-PAYLOAD] URL: {response.url} | Dict Keys: {top_keys}")
-                                elif isinstance(json_data, list):
-                                    logger.info(f"[{bm_label}-PAYLOAD] URL: {response.url} | List Length: {len(json_data)}")
+                                score = score_sportsbook_payload(json_data)
+                                matches_kw = any(kw.lower() in res_url for kw in keywords)
+
+                                json_preview_str = json.dumps(json_data)[:500] if isinstance(json_data, (dict, list)) else str(json_data)[:500]
+                                top_keys = list(json_data.keys())[:15] if isinstance(json_data, dict) else []
+
+                                candidate_entry = {
+                                    "url": response.url,
+                                    "score": score,
+                                    "size_bytes": content_length,
+                                    "top_level_keys": top_keys,
+                                    "preview": json_preview_str
+                                }
+                                json_candidates.append(candidate_entry)
+
+                                if score > 15 or matches_kw:
+                                    captured_payloads.append((response.url, json_data))
+                                    if score > 25 and not matches_kw:
+                                        update_endpoint_cache(bookmaker_id, response.url, score)
+
+                                    if NETWORK_RECORDER:
+                                        logger.info(f"[{bm_label}-PAYLOAD-DISCOVERED] URL: {response.url} | Score: {score}")
+                        except Exception:
+                            pass
 
             page.on("response", handle_response)
-            logger.info(f"[{bm_label}-INTERCEPTOR] Navigating to {url}...")
+            logger.info(f"[{bm_label}-INTERCEPTOR] Navigating to target: {url}...")
 
+            # 5. Navigation Execution
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=12000)
+
+                # Dynamic Smart Polling Loop
+                deadline = time.time() + max_timeout
+                while time.time() < deadline:
+                    if len(captured_payloads) > 0:
+                        logger.info(f"[{bm_label}-EARLY-EXIT] Discovered {len(captured_payloads)} high-scoring payloads.")
+                        break
+
+                    await page.mouse.wheel(0, 800)
+                    await asyncio.sleep(1.0)
+
+            except Exception as e:
+                logger.warning(f"[{bm_label}-NAV-WARNING] Navigation incomplete: {repr(e)}")
+
+            # 6. DOM State & SSR Hydration Parsing Fallback
+            html_content = ""
+            page_title = ""
+            try:
+                page_title = await page.title()
+                html_content = await page.content()
                 
-                await page.mouse.move(400, 500)
-                await page.evaluate("window.scrollBy(0, 1200)")
-                
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=6000)
-                except Exception:
-                    pass
-                
-                await asyncio.sleep(4.0)
+                if len(captured_payloads) == 0:
+                    ssr_payloads = extract_ssr_hydration_json(html_content)
+                    for ssr_data in ssr_payloads:
+                        captured_payloads.append((page.url, ssr_data))
+                        logger.info(f"[{bm_label}-SSR-EXTRACTED] Parsed inline hydration payload from DOM state.")
             except Exception:
                 pass
 
-            await page.close()
-            await context.close()
-
+            # 7. Parse Matches
             latency_ms = int((time.time() - start_t) * 1000)
-
             for idx, (res_url, payload) in enumerate(captured_payloads, 1):
                 parsed = parse_raw_payload(bookmaker_id, payload, latency_ms=latency_ms)
-                logger.info(f"[{bm_label}-PAYLOAD #{idx}] Extracted {len(parsed)} matches from {res_url[:60]}...")
                 all_matches.extend(parsed)
 
             unique_matches = list({f"{m['bookmaker_id']}_{m['match_id']}": m for m in all_matches if isinstance(m, dict) and m.get("match_id")}.values()) if all_matches else []
             logger.info(f"[{bm_label}-SUMMARY] Captured {len(captured_payloads)} total payloads, parsed {len(unique_matches)} unique matches.")
 
-            if len(captured_payloads) == 0:
-                sample = all_response_urls[:25]
-                logger.warning(
-                    f"[{bm_label}-NO-MATCH-DEBUG] 0 keyword matches. Saw {len(all_response_urls)} "
-                    f"total non-static responses. Sample: {sample}"
-                )
+            # 8. Forensic Artifact Dump (Only executed when SAVE_DIAGNOSTICS=true on 0 matches)
+            if SAVE_DIAGNOSTICS and len(unique_matches) == 0:
+                bm_dir = os.path.join(DIAGNOSTICS_DIR, bookmaker_id)
+                os.makedirs(bm_dir, exist_ok=True)
+
+                diagnostic_artifact = {
+                    "bookmaker": bookmaker_id,
+                    "target_url": url,
+                    "final_url": page.url if page else "N/A",
+                    "title": page_title,
+                    "redirect_chain": redirect_chain,
+                    "requests": requests_log,
+                    "responses": responses_log,
+                    "json_candidates": json_candidates,
+                    "websockets": websockets_log,
+                    "html_hydration_flags": {
+                        "has_next_data": "__NEXT_DATA__" in html_content,
+                        "has_nuxt": "__NUXT__" in html_content,
+                        "has_initial_state": "__INITIAL_STATE__" in html_content,
+                        "has_apollo_state": "__APOLLO_STATE__" in html_content,
+                    }
+                }
+
+                with open(os.path.join(bm_dir, "report.json"), "w", encoding="utf-8") as f:
+                    json.dump(diagnostic_artifact, f, indent=2)
+
+                # Save compressed HTML page
+                if html_content:
+                    with open(os.path.join(bm_dir, "page.html.gz"), "wb") as f:
+                        f.write(zlib.compress(html_content.encode("utf-8")))
+
+                if page:
+                    await page.screenshot(path=os.path.join(bm_dir, "screenshot.png"), full_page=True)
 
             return unique_matches
 
         except Exception as e:
-            logger.error(f"[{bookmaker_id}-INTERCEPTOR] Error ({type(e).__name__}): {repr(e)}")
+            logger.error(f"[{bm_label}-INTERCEPTOR] Critical Error ({type(e).__name__}): {repr(e)}")
+        finally:
+            # Guaranteed Context & Page Destruction
+            if page:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+            if context:
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+
     return []
 
 
 # -------------------------------------------------------------------
-# DISPATCHER MASTER SCANNER LOOP
+# DISPATCHER MASTER SCANNER LOOP WITH DISCOVERED ENDPOINT ACCELERATION
 # -------------------------------------------------------------------
 
 async def scrape_all_sportsbooks() -> Dict[str, Any]:
     all_matches = []
+    cache = load_endpoint_cache()
 
-    # 1. Direct REST Scrapers
-    http_targets = {bm: cfg for bm, cfg in BOOKMAKER_REGISTRY.items() if cfg["platform"] in ["public_rest"]}
+    # 1. Direct REST Targets (Static Registry + Discovered Dynamic Endpoints)
+    http_targets = {}
+    playwright_targets = {}
 
+    for bm, cfg in BOOKMAKER_REGISTRY.items():
+        if cfg["platform"] == "public_rest":
+            http_targets[bm] = cfg
+        elif bm in cache and cache[bm].get("endpoint"):
+            # Accelerated Route: Query discovered REST endpoint directly
+            cached_url = cache[bm]["endpoint"]
+            http_targets[bm] = {
+                "platform": "public_rest",
+                "url": cached_url,
+                "parser": cfg.get("parser", "generic"),
+                "timeout": 10
+            }
+            logger.info(f"[{bm.upper()}-ACCELERATED] Using discovered endpoint from cache: {cached_url}")
+        else:
+            playwright_targets[bm] = cfg
+
+    # Execute Fast REST Fetching
     async with AsyncSession() as session:
         http_tasks = [fetch_http_api(session, bm, cfg) for bm, cfg in http_targets.items()]
         http_results = await asyncio.gather(*http_tasks, return_exceptions=True)
-        for res in http_results:
-            if isinstance(res, list):
+        for idx, (bm, res) in enumerate(zip(http_targets.keys(), http_results)):
+            if isinstance(res, list) and len(res) > 0:
                 all_matches.extend([x for x in res if isinstance(x, dict)])
+            elif bm in cache and BOOKMAKER_REGISTRY[bm]["platform"] == "playwright_spa":
+                # Fallback to Playwright Discovery if cached endpoint expired or failed
+                logger.warning(f"[{bm.upper()}-CACHE-EXPIRED] Cached endpoint failed. Re-enabling Playwright Discovery engine.")
+                playwright_targets[bm] = BOOKMAKER_REGISTRY[bm]
 
-    # 2. Playwright Interceptors
-    playwright_targets = {bm: cfg for bm, cfg in BOOKMAKER_REGISTRY.items() if cfg["platform"] == "playwright_spa"}
+    # Execute Playwright Interceptors for remaining targets
+    if playwright_targets:
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--disable-blink-features=AutomationControlled",
+                        "--disable-dev-shm-usage"
+                    ]
+                )
+                pw_tasks = [intercept_playwright_spa(browser, bm, cfg) for bm, cfg in playwright_targets.items()]
+                pw_results = await asyncio.gather(*pw_tasks, return_exceptions=True)
+                for res in pw_results:
+                    if isinstance(res, list):
+                        all_matches.extend([x for x in res if isinstance(x, dict)])
+                await browser.close()
+        except Exception as e:
+            logger.error(f"Playwright Execution Batch Error: {repr(e)}")
 
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-dev-shm-usage"
-                ]
-            )
-            pw_tasks = [intercept_playwright_spa(browser, bm, cfg) for bm, cfg in playwright_targets.items()]
-            pw_results = await asyncio.gather(*pw_tasks, return_exceptions=True)
-            for res in pw_results:
-                if isinstance(res, list):
-                    all_matches.extend([x for x in res if isinstance(x, dict)])
-            await browser.close()
-    except Exception as e:
-        logger.error(f"Playwright Execution Batch Error: {repr(e)}")
-
-    # 3. Calculate Surebets across Multi-Sport Feeds
+    # Calculate Cross-Bookmaker Arbitrage
     arbitrage_ops = find_arbitrage_opportunities(all_matches, bankroll=100000.0)
 
     logger.info(f"=== SCAN COMPLETED: Extracted {len(all_matches)} matches | Found {len(arbitrage_ops)} True Cross-Bookmaker Surebets ===")
