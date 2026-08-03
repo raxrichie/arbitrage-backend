@@ -19,7 +19,7 @@ NETWORK_RECORDER = os.getenv("NETWORK_RECORDER", "false").lower() == "true"
 SAVE_DIAGNOSTICS = os.getenv("SAVE_DIAGNOSTICS", "true").lower() == "true"
 DIAGNOSTICS_DIR = "diagnostics"
 CACHE_FILE = "endpoints_cache.json"
-CACHE_TTL_SECONDS = 3600 * 24  # 24 hours
+CACHE_TTL_SECONDS = 3600 * 24  # 24 hours TTL
 
 if SAVE_DIAGNOSTICS and not os.path.exists(DIAGNOSTICS_DIR):
     os.makedirs(DIAGNOSTICS_DIR, exist_ok=True)
@@ -107,9 +107,9 @@ def update_endpoint_cache(bookmaker_id: str, endpoint_url: str, score: int):
     try:
         with open(CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(cache, f, indent=2)
-        logger.info(f"[{bookmaker_id.upper}-CACHE-UPDATED] Saved endpoint: {endpoint_url} with score {score}")
+        logger.info(f"[{bookmaker_id.upper()}-CACHE-UPDATED] Saved endpoint: {endpoint_url} with score {score}")
     except Exception as e:
-        logger.error(f"[{bookmaker_id.upper}-CACHE-ERROR] Failed to save endpoint cache: {repr(e)}")
+        logger.error(f"[{bookmaker_id.upper()}-CACHE-ERROR] Failed to save endpoint cache: {repr(e)}")
 
 
 # -------------------------------------------------------------------
@@ -143,7 +143,7 @@ def resolve_sport_name(raw_val: Any) -> str:
 
 def generate_event_fingerprint(home: str, away: str, sport: str) -> str:
     ignored_words = {"fc", "cf", "united", "city", "town", "real", "athletic", "club", "sc", "sporting", "st", "saint", "afc", "ec"}
-    
+
     def tokenize(name: str) -> List[str]:
         words = [w for w in "".join(c if c.isalnum() else " " for c in name.lower()).split() if len(w) > 1]
         meaningful = [w for w in words if w not in ignored_words]
@@ -447,7 +447,7 @@ BOOKMAKER_REGISTRY = {
     "1xbet": {"platform": "public_rest", "url": "https://1xbet.co.tz/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en&gr=329&mode=4&country=181&partner=1499", "parser": "1xcorp", "timeout": 10},
     "1xbit": {"platform": "public_rest", "url": "https://1xbit.com/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en&gr=329&mode=4&country=181&partner=933", "parser": "1xcorp", "timeout": 10},
     "megapari": {"platform": "public_rest", "url": "https://megapari.com/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en&gr=329&mode=4&country=181&partner=824", "parser": "1xcorp", "timeout": 10},
-    "melbet": {"platform": "public_rest", "url": "https://melbet.co.tz/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en&gr=329&mode=4&country=181&partner=151", "parser": "1xcorp", "timeout": 10},
+    "melbet": {"platform": "public_rest", "url": "https://melbet.co.tz/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en&gr=329&mode=4&country=181&partner=1", "parser": "1xcorp", "timeout": 10},
 
     # Non-1XCorp SPA Targets via Stealth Playwright Interceptors
     "sportpesa": {"platform": "playwright_spa", "url": "https://www.sportpesa.co.tz/en/sports-betting/football-1/", "keywords": ["/api/", "games", "upcoming", "highlights"], "parser": "sportybet"},
