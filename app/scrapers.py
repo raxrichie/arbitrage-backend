@@ -16,7 +16,7 @@ logger = logging.getLogger("scrapers")
 
 # Feature Flags & Cache Configuration
 NETWORK_RECORDER = os.getenv("NETWORK_RECORDER", "false").lower() == "true"
-SAVE_DIAGNOSTICS = os.getenv("SAVE_DIAGNOSTICS", "false").lower() == "true"
+SAVE_DIAGNOSTICS = os.getenv("SAVE_DIAGNOSTICS", "true").lower() == "true"
 DIAGNOSTICS_DIR = "diagnostics"
 CACHE_FILE = "endpoints_cache.json"
 
@@ -220,7 +220,6 @@ def score_sportsbook_payload(obj: Any) -> int:
 
 
 def extract_ssr_hydration_json(html_content: str) -> List[Dict[str, Any]]:
-    """Extracts and parses SSR hydration objects directly out of the DOM."""
     found_payloads = []
     ssr_patterns = [
         r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>',
@@ -899,10 +898,10 @@ async def fetch_http_api(session: AsyncSession, bookmaker_id: str, config: dict,
 
 
 # -------------------------------------------------------------------
-# ADVANCED PLAYWRIGHT INTERCEPTOR WITH CACHE & FORENSIC ARTIFACTS
+# ADVANCED PLAYWRIGHT INTERCEPTOR WITH SSL BYPASS & SPLIT TIMEOUTS
 # -------------------------------------------------------------------
 
-async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: dict, max_timeout: float = 20.0) -> List[Dict[str, Any]]:
+async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: dict, discovery_timeout: float = 20.0) -> List[Dict[str, Any]]:
     url = config["url"]
     keywords = config.get("keywords", [])
     bm_label = bookmaker_id.upper()
@@ -917,11 +916,13 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
     json_candidates = []
 
     async with PLAYWRIGHT_SEMAPHORE:
-        start_t = time.time()
+        start_t = time.perf_counter()
         context = None
         page = None
         try:
+            # Add ignore_https_errors=True to context creation
             context = await browser.new_context(
+                ignore_https_errors=True,
                 user_agent=DESKTOP_USER_AGENT,
                 locale="en-US",
                 timezone_id="Africa/Dar_es_Salaam",
@@ -937,12 +938,12 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
             page = await context.new_page()
 
             # 1. Track Timestamped Frame Navigations
-            page.on("framenavigated", lambda frame: redirect_chain.append({"time": round(time.time() - start_t, 2), "url": frame.url}) if (frame == page.main_frame) else None)
+            page.on("framenavigated", lambda frame: redirect_chain.append({"time": round(time.perf_counter() - start_t, 2), "url": frame.url}) if (frame == page.main_frame) else None)
 
             # 2. Track WebSockets
             page.on("websocket", lambda ws: websockets_log.append(ws.url))
 
-            # 3. Route Interceptor with Method, Resource Type & Initiator
+            # 3. Route Interceptor
             async def handle_route(route):
                 req = route.request
                 if req.resource_type in ("xhr", "fetch"):
@@ -965,7 +966,6 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
                     if any(x in res_url for x in IGNORE_JSON_KEYWORDS):
                         return
 
-                    # Record Response Sizes
                     try:
                         content_length = int(response.headers.get("content-length", 0)) or len(await response.body())
                     except Exception:
@@ -1006,12 +1006,15 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
             page.on("response", handle_response)
             logger.info(f"[{bm_label}-INTERCEPTOR] Navigating to target: {url}...")
 
-            # 5. Navigation Execution
+            # 5. Split Navigation Execution: wait_until="commit" with 30s Timeout
+            nav_start = time.perf_counter()
             try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=12000)
+                await page.goto(url, wait_until="commit", timeout=30000)
+                nav_duration = time.perf_counter() - nav_start
+                logger.info(f"[{bm_label}-LANDED] Target: {url} | Final URL: {page.url} | Nav Completed in {nav_duration:.2f}s")
 
-                # Dynamic Smart Polling Loop
-                deadline = time.time() + max_timeout
+                # 6. Separate Discovery Polling Timeout Loop (20s)
+                deadline = time.time() + discovery_timeout
                 while time.time() < deadline:
                     if len(captured_payloads) > 0:
                         logger.info(f"[{bm_label}-EARLY-EXIT] Discovered {len(captured_payloads)} high-scoring payloads.")
@@ -1021,9 +1024,9 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
                     await asyncio.sleep(1.0)
 
             except Exception as e:
-                logger.warning(f"[{bm_label}-NAV-WARNING] Navigation incomplete: {repr(e)}")
+                logger.warning(f"[{bm_label}-NAV-WARNING] Navigation incomplete or timed out: {repr(e)}")
 
-            # 6. DOM State & SSR Hydration Parsing Fallback
+            # 7. DOM State & SSR Hydration Parsing Fallback
             html_content = ""
             page_title = ""
             try:
@@ -1038,8 +1041,8 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
             except Exception:
                 pass
 
-            # 7. Parse Matches
-            latency_ms = int((time.time() - start_t) * 1000)
+            # 8. Parse Matches
+            latency_ms = int((time.perf_counter() - start_t) * 1000)
             for idx, (res_url, payload) in enumerate(captured_payloads, 1):
                 parsed = parse_raw_payload(bookmaker_id, payload, latency_ms=latency_ms)
                 all_matches.extend(parsed)
@@ -1047,7 +1050,7 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
             unique_matches = list({f"{m['bookmaker_id']}_{m['match_id']}": m for m in all_matches if isinstance(m, dict) and m.get("match_id")}.values()) if all_matches else []
             logger.info(f"[{bm_label}-SUMMARY] Captured {len(captured_payloads)} total payloads, parsed {len(unique_matches)} unique matches.")
 
-            # 8. Forensic Artifact Dump (Only executed when SAVE_DIAGNOSTICS=true on 0 matches)
+            # 9. Forensic Artifact Dump (Only executed when SAVE_DIAGNOSTICS=true on 0 matches)
             if SAVE_DIAGNOSTICS and len(unique_matches) == 0:
                 bm_dir = os.path.join(DIAGNOSTICS_DIR, bookmaker_id)
                 os.makedirs(bm_dir, exist_ok=True)
@@ -1117,7 +1120,6 @@ async def scrape_all_sportsbooks() -> Dict[str, Any]:
         if cfg["platform"] == "public_rest":
             http_targets[bm] = cfg
         elif bm in cache and cache[bm].get("endpoint"):
-            # Accelerated Route: Query discovered REST endpoint directly
             cached_url = cache[bm]["endpoint"]
             http_targets[bm] = {
                 "platform": "public_rest",
@@ -1137,11 +1139,10 @@ async def scrape_all_sportsbooks() -> Dict[str, Any]:
             if isinstance(res, list) and len(res) > 0:
                 all_matches.extend([x for x in res if isinstance(x, dict)])
             elif bm in cache and BOOKMAKER_REGISTRY[bm]["platform"] == "playwright_spa":
-                # Fallback to Playwright Discovery if cached endpoint expired or failed
                 logger.warning(f"[{bm.upper()}-CACHE-EXPIRED] Cached endpoint failed. Re-enabling Playwright Discovery engine.")
                 playwright_targets[bm] = BOOKMAKER_REGISTRY[bm]
 
-    # Execute Playwright Interceptors for remaining targets
+    # Execute Playwright Interceptors with Ignore Certificate Error Flag
     if playwright_targets:
         try:
             async with async_playwright() as p:
@@ -1151,7 +1152,8 @@ async def scrape_all_sportsbooks() -> Dict[str, Any]:
                         "--no-sandbox",
                         "--disable-setuid-sandbox",
                         "--disable-blink-features=AutomationControlled",
-                        "--disable-dev-shm-usage"
+                        "--disable-dev-shm-usage",
+                        "--ignore-certificate-errors"  # Chromium launch flag for SSL bypass
                     ]
                 )
                 pw_tasks = [intercept_playwright_spa(browser, bm, cfg) for bm, cfg in playwright_targets.items()]
