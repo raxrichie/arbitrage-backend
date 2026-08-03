@@ -356,15 +356,15 @@ def find_arbitrage_opportunities(all_matches: List[Dict[str, Any]], bankroll: fl
 # -------------------------------------------------------------------
 
 BOOKMAKER_REGISTRY = {
-    # Direct Public REST APIs (Multi-Sport Parameters)
+    # Direct Public REST APIs (Ultra-Fast Engine)
     "betika": {"platform": "public_rest", "url": "https://api.betika.com/v1/uo/matches?limit=100&sub_type=prematch", "parser": "betika", "timeout": 8},
     "sportybet": {"platform": "public_rest", "url": "https://www.sportybet.com/api/tz/factsCenter/pcUpcomingEvents?pageSize=100&pageNum=1&option=1", "parser": "sportybet", "timeout": 8},
     "bangbet": {"platform": "public_rest", "url": "https://bet-api.bangbet.com/api/bet/match/listTop?country=tz", "parser": "bangbet", "timeout": 8},
     "leonbet": {"platform": "public_rest", "url": "https://leonbet.co.tz/api-2/betline/events/all?ctag=en-US", "parser": "leonbet", "timeout": 25},
     "premierbet": {"platform": "public_rest", "url": "https://sports-api.premierbet.co.tz/v1/events/highlights?country=TZ&group=g2&platform=desktop&locale=sw&limit=100", "parser": "premierbet", "timeout": 8},
-    "meridianbet": {"platform": "playwright_spa", "url": "https://meridianbet.co.tz/en/betting/football", "keywords": ["/api/", "/events/", "betsapi", "standard", "v2"], "parser": "meridianbet"},
+    "kingbet": {"platform": "public_rest", "url": "https://www.kingbet.co.tz/api/redis_data/home", "parser": "generic", "timeout": 10},
 
-    # ALL 1XCORP CLONES BROAD MULTI-SPORT FEEDS
+    # ALL 1XCORP CLONES BROAD MULTI-SPORT FEEDS (Direct REST)
     "22bet": {"platform": "public_rest", "url": "https://22bet.co.tz/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en_GB&gr=329&mode=4&country=181&partner=151", "parser": "1xcorp", "timeout": 10},
     "helabet": {"platform": "public_rest", "url": "https://helabet.co.tz/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en&gr=329&mode=4&country=181&partner=237", "parser": "1xcorp", "timeout": 10},
     "betwinner": {"platform": "public_rest", "url": "https://betwinner.co.tz/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en&gr=329&mode=4&country=181&partner=777", "parser": "1xcorp", "timeout": 10},
@@ -374,12 +374,11 @@ BOOKMAKER_REGISTRY = {
     "melbet": {"platform": "public_rest", "url": "https://melbet.co.tz/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en&gr=329&mode=4&country=181&partner=195", "parser": "1xcorp", "timeout": 10},
 
     # Non-1XCorp SPA Targets via Stealth Playwright Interceptors
+    "meridianbet": {"platform": "playwright_spa", "url": "https://meridianbet.co.tz/en/betting/football", "keywords": ["/api/", "/events/", "betsapi", "standard", "v2"], "parser": "meridianbet"},
     "mbet": {"platform": "playwright_spa", "url": "https://mbet.co.tz", "keywords": ["/api/", "sportsbook", "matches", "events"], "parser": "generic"},
     "1win": {"platform": "playwright_spa", "url": "https://1win.co.tz", "keywords": ["/api/", "sports", "football", "matches"], "parser": "generic"},
-    "thronebet": {"platform": "playwright_spa", "url": "https://thronebet.co.tz/en/sportsbook", "keywords": ["/api/", "events", "highlights"], "parser": "generic"},
-    "kingbet": {"platform": "playwright_spa", "url": "https://kingbet.co.tz/en/sportsbook", "keywords": ["/api/", "redis_data", "home", "events"], "parser": "generic"},
     "galsport": {"platform": "playwright_spa", "url": "https://gsb.co.tz/en/sportsbook/highlights", "keywords": ["/api/", "highlights", "events", "sportsbook", "get", "fixtures", "evapi"], "parser": "generic"},
-    "parimatch": {"platform": "playwright_spa", "url": "https://parimatch.co.tz", "keywords": ["prematch", "events", "sportsbook", "/api/", "line"], "parser": "generic"},
+    "parimatch": {"platform": "playwright_spa", "url": "https://parimatch.co.tz", "keywords": ["prematch", "sportsbook/desktop", "line/events"], "parser": "generic"},
     "betway": {"platform": "playwright_spa", "url": "https://www.betway.co.tz", "keywords": ["highlights", "sportsapi", "event", "betbook"], "parser": "generic"},
     "sokabet": {"platform": "playwright_spa", "url": "https://sokabet.co.tz", "keywords": ["api", "events", "highlights", "GetTopEvents", "altenar"], "parser": "generic"},
 }
