@@ -10,13 +10,6 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 from curl_cffi.requests import AsyncSession
-from tenacity import (
-    retry,
-    stop_after_attempt,
-    wait_exponential,
-    retry_if_exception,
-    before_sleep_log,
-)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("scrapers")
@@ -114,9 +107,9 @@ def update_endpoint_cache(bookmaker_id: str, endpoint_url: str, score: int):
     try:
         with open(CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(cache, f, indent=2)
-        logger.info(f"[{bookmaker_id.upper()}-CACHE-UPDATED] Saved endpoint: {endpoint_url} with score {score}")
+        logger.info(f"[{bookmaker_id.upper}-CACHE-UPDATED] Saved endpoint: {endpoint_url} with score {score}")
     except Exception as e:
-        logger.error(f"[{bookmaker_id.upper()}-CACHE-ERROR] Failed to save endpoint cache: {repr(e)}")
+        logger.error(f"[{bookmaker_id.upper}-CACHE-ERROR] Failed to save endpoint cache: {repr(e)}")
 
 
 # -------------------------------------------------------------------
