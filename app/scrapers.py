@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """
-Scraper: Robust Odds Fetcher + Arbitrage Engine
-Improvements:
+Robust Odds Scraper + Arbitrage Engine (amended, all eight improvements)
+
+Improvements implemented (1-8):
 1) Deeper WebSocket integration for real-time odds
-2) Rate limiting with exponential backoff + optional proxies
+2) Robust rate limiting with exponential backoff + per-bookmaker proxy support
 3) Safer, extensible parser with a stronger fallback
 4) Externalized registry via bookmakers.yaml (overrides)
-5) Improved event fingerprinting / deduplication
-6) Enhanced Playwright waiting, selectors, and load-more handling
-7) Data normalization adding basic aliases
-8) Safer asyncio.gather with per-task error handling
+5) Improved event fingerprinting and deduplication (with normalization)
+6) Enhanced Playwright waiting logic (selectors, network idle, click-to-load-more)
+7) Data normalization (aliases, competition normalization, consistent odds)
+8) Safer asyncio.gather usage with per-task error handling
+
+Notes:
+- Create bookmakers.yaml to override DEFAULT_BOOKMAKER_REGISTRY.
+- This script focuses on clarity and robustness. Adapt the registry to your environment.
 """
 
 import asyncio
@@ -19,18 +24,17 @@ import os
 import re
 import time
 import zlib
+import difflib
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
 from urllib.parse import urlparse
 
-# Optional YAML for external config
 try:
     import yaml  # type: ignore
 except Exception:
     yaml = None
 
-# HTTP client
 from curl_cffi.requests import AsyncSession
 
 # Logging
@@ -45,26 +49,25 @@ SAVE_DIAGNOSTICS = os.getenv("SAVE_DIAGNOSTICS", "true").lower() == "true"
 DIAGNOSTICS_DIR = "diagnostics"
 CACHE_FILE = "endpoints_cache.json"
 CACHE_TTL_SECONDS = 3600 * 24  # 24 hours TTL
-PROXY_ENV = os.getenv("SCRAPER_PROXY")  # Optional: global proxy (e.g., http://user:pass@host:port)
+SCRAPER_PROXY = os.getenv("SCRAPER_PROXY")  # Optional global proxy
 
 if SAVE_DIAGNOSTICS and not os.path.exists(DIAGNOSTICS_DIR):
     os.makedirs(DIAGNOSTICS_DIR, exist_ok=True)
 
-# Ignore infrastructure endpoints before payload scoring
 IGNORE_JSON_KEYWORDS = (
     "growthbook", "analytics", "geo-location", "config", "translations",
     "feature", "consent", "cookies", "telemetry", "google-analytics", "facebook"
 )
 
-# Stealth browser patchright initialization
+# Stealth browser
 try:
     from patchright.async_api import Browser, async_playwright
-    logger.info("Using patchright for browser automation (stealth fork enabled).")
-except ImportError:
+    logger.info("Using patchright for browser automation (stealth).")
+except Exception:
     from playwright.async_api import Browser, async_playwright
-    logger.warning("patchright not installed — falling back to plain playwright.")
+    logger.warning("patchright not available; using plain Playwright.")
 
-# User-Agent & headers
+
 DESKTOP_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
@@ -83,7 +86,7 @@ REAL_BROWSER_HEADERS = {
     "Sec-Ch-Ua-Platform": '"Windows"',
 }
 
-# Sports map
+# Sport map
 SPORT_MAP = {
     "sr:sport:1": "soccer", "1": "soccer",
     "sr:sport:2": "basketball", "2": "basketball",
@@ -100,51 +103,55 @@ SPORT_MAP = {
     "sr:sport:109": "esports",
     "sr:sport:117": "mma", "117": "mma",
 }
+
 HTTP_SEMAPHORE = asyncio.Semaphore(16)
 PLAYWRIGHT_SEMAPHORE = asyncio.Semaphore(2)
 
-# WebSocket odds state: bookmaker_id -> event_key -> {home, draw, away}
+# WebSocket odds state
 WEB_SOCKET_ODDS_STATE: Dict[str, Dict[str, Dict[str, Optional[float]]]] = {}
 
 # -------------------------------------------------------------------
-# ENDPOINT DISCOVERY CACHE ENGINE
+# ENDPOINT DISCOVERY & REGISTRY
 # -------------------------------------------------------------------
 def load_endpoint_cache() -> Dict[str, Any]:
     if os.path.exists(CACHE_FILE):
         try:
             with open(CACHE_FILE, "r", encoding="utf-8") as f:
                 cache_data = json.load(f)
-                current_time = time.time()
-                cleaned_cache = {}
-                for bm_id, entry in cache_data.items():
-                    if "last_verified" in entry:
-                        try:
-                            last_verified_ts = time.mktime(
-                                time.strptime(entry["last_verified"], "%Y-%m-%dT%H:%M:%SZ")
-                            )
-                            if current_time - last_verified_ts < CACHE_TTL_SECONDS:
-                                cleaned_cache[bm_id] = entry
-                        except ValueError:
-                            logger.warning(f"Invalid last_verified format for {bm_id}: {entry.get('last_verified')}")
-                return cleaned_cache
+            # prune TTL
+            now = time.time()
+            cleaned = {}
+            for k, v in cache_data.items():
+                ts = v.get("last_verified")
+                if ts:
+                    try:
+                        last = time.mktime(time.strptime(ts, "%Y-%m-%dT%H:%M:%SZ"))
+                        if now - last < CACHE_TTL_SECONDS:
+                            cleaned[k] = v
+                    except ValueError:
+                        continue
+            return cleaned
         except Exception as e:
-            logger.error(f"Failed to load or clean endpoint cache: {repr(e)}")
-            pass
+            logger.error(f"Failed to load endpoint cache: {repr(e)}")
     return {}
 
-def load_external_registry(base_registry: Dict[str, Any]) -> Dict[str, Any]:
-    """Load external registry overrides from bookmakers.yaml if available."""
+def load_external_registry(base_registry: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Merge external bookmaker registry overrides from bookmakers.yaml if available."""
     reg = dict(base_registry)
-    if yaml is not None and os.path.exists("bookmakers.yaml"):
-        try:
-            with open("bookmakers.yaml", "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
-                if isinstance(data, dict):
-                    reg.update(data)
-                    logger.info("Loaded external bookmaker registry from bookmakers.yaml")
-        except Exception as e:
-            logger.error(f"Failed to load bookmakers.yaml: {repr(e)}")
-    return reg
+    if yaml is None:
+        return reg
+    if not os.path.exists("bookmakers.yaml"):
+        return reg
+    try:
+        with open("bookmakers.yaml", "r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+            if isinstance(data, dict):
+                reg.update(data)
+                logger.info("Merged external bookmakers.yaml overrides into registry.")
+            return reg
+    except Exception as e:
+        logger.error(f"Failed to load bookmakers.yaml: {repr(e)}")
+        return reg
 
 def update_endpoint_cache(bookmaker_id: str, endpoint_url: str, score: int):
     cache = load_endpoint_cache()
@@ -156,13 +163,33 @@ def update_endpoint_cache(bookmaker_id: str, endpoint_url: str, score: int):
     try:
         with open(CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(cache, f, indent=2)
-        logger.info(f"[{bookmaker_id.upper()}-CACHE-UPDATED] Saved endpoint: {endpoint_url} with score {score}")
+        logger.info(f"[{bookmaker_id.upper()}-CACHE-UPDATED] Saved endpoint: {endpoint_url} (score={score})")
     except Exception as e:
         logger.error(f"[{bookmaker_id.upper()}-CACHE-ERROR] Failed to save endpoint cache: {repr(e)}")
 
 # -------------------------------------------------------------------
-# UTILITY FUNCTIONS & STRUCTURAL SCORING
+# UTILITY & NORMALIZATION
 # -------------------------------------------------------------------
+def normalize_team_name(name: Any) -> str:
+    if not name:
+        return ""
+    s = str(name).strip().lower()
+    # basic aliases
+    aliases = {
+        "man utd": "manchester united",
+        "man united": "manchester united",
+        "man city": "manchester city",
+        "fc barcelona": "barcelona",
+        "fc madrid": "real madrid",
+    }
+    s = aliases.get(s, s)
+    return s
+
+def extract_team_name(val: Any) -> str:
+    if isinstance(val, dict):
+        return str(val.get("name") or val.get("nameDefault") or val.get("title") or "").strip()
+    return str(val or "").strip()
+
 def resolve_sport_name(raw_val: Any) -> str:
     if not raw_val:
         return "soccer"
@@ -171,48 +198,29 @@ def resolve_sport_name(raw_val: Any) -> str:
         return SPORT_MAP[val_str]
     if any(k in val_str for k in ["foot", "soccer", "football"]):
         return "soccer"
-    elif "basket" in val_str:
+    if "basket" in val_str:
         return "basketball"
-    elif "tennis" in val_str and "table" not in val_str:
+    if "tennis" in val_str and "table" not in val_str:
         return "tennis"
-    elif "table" in val_str or "ping" in val_str:
+    if "table" in val_str or "ping" in val_str:
         return "table_tennis"
-    elif "volley" in val_str:
+    if "volley" in val_str:
         return "volleyball"
-    elif any(k in val_str for k in ["mma", "ufc", "fighting", "boxing"]):
+    if any(k in val_str for k in ["mma", "ufc", "fighting", "boxing"]):
         return "mma"
-    elif "handball" in val_str:
+    if "handball" in val_str:
         return "handball"
-    elif "dart" in val_str:
+    if "dart" in val_str:
         return "darts"
     return val_str.replace(" ", "_")
 
-def normalize_team_name(name: str) -> str:
-    # Basic normalization + simple alias handling
-    if not name:
-        return ""
-    s = name.strip().lower()
-    aliases = {
-        "man utd": "manchester united",
-        "man united": "manchester united",
-        "man city": "manchester city",
-    }
-    s = aliases.get(s, s)
-    return s
-
 def generate_event_fingerprint(home: str, away: str, sport: str) -> str:
-    ignored_words = {"fc", "cf", "united", "city", "town", "real", "athletic", "club", "sc", "sporting", "st", "saint", "afc", "ec"}
-    def tokenize(name: str) -> List[str]:
-        words = [w for w in "".join(c if c.isalnum() else " " for c in name.lower()).split() if len(w) > 1]
-        meaningful = [w for w in words if w not in ignored_words]
-        return sorted(meaningful) if meaningful else sorted(words)
-    home_tokens = tokenize(home)
-    away_tokens = tokenize(away)
-    if not home_tokens or not away_tokens:
-        return f"{sport}_{home.lower()[:8]}_{away.lower()[:8]}"
-    home_key = "_".join(home_tokens[:2])
-    away_key = "_".join(away_tokens[:2])
-    return f"{sport}_{home_key}_vs_{away_key}"
+    # Normalized fingerprint to improve cross-bookmaker dedup
+    home_n = normalize_team_name(home)
+    away_n = normalize_team_name(away)
+    if not home_n or not away_n:
+        return f"{sport}_{home.lower()[:6]}_{away.lower()[:6]}"
+    return f"{sport}_{home_n[:6]}_vs_{away_n[:6]}"
 
 def get_dynamic_headers(target_url: str) -> Dict[str, str]:
     parsed = urlparse(target_url)
@@ -227,108 +235,85 @@ def safe_float(val: Any, default: Optional[float] = None) -> Optional[float]:
     if val is None:
         return default
     try:
-        parsed = float(val)
-        return parsed if parsed > 1.01 else default
+        f = float(val)
+        return f if f > 1.01 else default
     except (ValueError, TypeError):
         return default
 
-def extract_team_name(val: Any) -> str:
-    if isinstance(val, dict):
-        return str(val.get("name") or val.get("nameDefault") or val.get("title") or "").strip()
-    return str(val or "").strip()
+# Basic dedup across matches; can enhance with fuzzy matching
+def deduplicate_matches(all_matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not all_matches:
+        return []
+    seen: Dict[str, Dict[str, Any]] = {}
+    for m in all_matches:
+        if not isinstance(m, dict):
+            continue
+        # Build a stable key
+        key = f"{m.get('bookmaker_id','')}|{m.get('match_id','')}"
+        if key not in seen:
+            seen[key] = m
+        else:
+            # Prefer the one with more complete odds
+            existing = seen[key]
+            if (m.get("home_odds") is not None) and (existing.get("home_odds") is None):
+                seen[key] = m
+            elif (m.get("away_odds") is not None) and (existing.get("away_odds") is None):
+                seen[key] = m
+    return list(seen.values())
 
-def validate_match(match: Dict[str, Any]) -> bool:
-    if not isinstance(match, dict):
-        return False
-    home = extract_team_name(match.get("home_team", ""))
-    away = extract_team_name(match.get("away_team", ""))
-    comp = str(match.get("competition", "")).lower()
-    virtual_keywords = ["zoom", "virtual", "cyber", "simulated", "srl", "esoccer", "eleague"]
-    if any(k in comp or k in home.lower() or k in away.lower() for k in virtual_keywords):
-        return False
-    if len(home) < 2 or len(away) < 2 or home.startswith("{") or away.startswith("{") or home == away:
-        return False
-    o1 = match.get("home_odds")
-    oX = match.get("draw_odds")
-    o2 = match.get("away_odds")
-    valid_odds = [o for o in [o1, oX, o2] if o is not None and isinstance(o, (int, float)) and o > 1.01]
-    sport = resolve_sport_name(match.get("sport", "soccer"))
-    if sport in ["tennis", "basketball", "volleyball", "mma", "table_tennis", "baseball", "darts", "handball"]:
-        return len(valid_odds) >= 2
-    else:
-        return len(valid_odds) >= 2 and oX is not None
-
-def score_sportsbook_payload(obj: Any) -> int:
-    score = 0
-    obj_str = str(obj).lower()
-    keywords = [
-        "home_team", "away_team", "competitors", "eventnames", "odds",
-        "markets", "outcomes", "1x2", "coef", "runners", "price", "value"
-    ]
-    for kw in keywords:
-        score += obj_str.count(kw)
-    if isinstance(obj, (dict, list)):
-        events = find_events_recursive(obj)
-        score += len(events) * 5
-    return score
-
+# SSR hydration finder
 def extract_ssr_hydration_json(html_content: str) -> List[Dict[str, Any]]:
-    found_payloads = []
-    ssr_patterns = [
+    found = []
+    patterns = [
         r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>',
         r'<script[^>]*id="__NUXT__"[^>]*>(.*?)</script>',
         r'window\.__INITIAL_STATE__\s*=\s*({.*?});',
         r'window\.__PRELOADED_STATE__\s*=\s*({.*?});',
         r'window\.__APOLLO_STATE__\s*=\s*({.*?});'
     ]
-    for pattern in ssr_patterns:
-        matches = re.findall(pattern, html_content, re.DOTALL)
-        for match in matches:
+    for pat in patterns:
+        for match in re.findall(pat, html_content, re.DOTALL):
             try:
                 data = json.loads(match.strip())
-                if score_sportsbook_payload(data) > 10:
-                    found_payloads.append(data)
-            except Exception as e:
-                logger.warning(f"Failed to parse SSR JSON payload: {repr(e)}")
-    return found_payloads
+                if isinstance(data, (dict, list)):
+                    found.append(data)
+            except Exception:
+                pass
+    return found
 
+# Recursive extractor for unknown payloads
 def find_events_recursive(obj: Any, depth: int = 0) -> List[Dict[str, Any]]:
     if depth > 4:
         return []
     if isinstance(obj, list):
-        if len(obj) > 0 and isinstance(obj[0], dict):
-            sample = obj[0]
-            if any(k in sample for k in ["home_team", "homeTeam", "competitors", "eventNames", "O1", "teams", "eName", "games", "matchId"]):
-                return [x for x in obj if isinstance(x, dict)]
+        if obj and isinstance(obj[0], dict):
+            return [x for x in obj if isinstance(x, dict)]
         events = []
         for item in obj[:10]:
             if isinstance(item, (dict, list)):
-                found = find_events_recursive(item, depth + 1)
-                if found:
-                    events.extend(found)
+                events.extend(find_events_recursive(item, depth + 1))
         return events
-    elif isinstance(obj, dict):
-        for key in ["events", "matches", "games", "fixtures", "items", "groupList", "matchVoList", "data", "sportsTree", "results"]:
-            if key in obj:
-                val = obj[key]
-                if isinstance(val, list):
-                    return [x for x in val if isinstance(x, dict)]
-                elif isinstance(val, dict):
-                    found = find_events_recursive(val, depth + 1)
+    if isinstance(obj, dict):
+        for k in ["events", "matches", "games", "fixtures", "items", "groupList", "matchVoList", "data", "sportsTree", "results"]:
+            if k in obj:
+                v = obj[k]
+                if isinstance(v, list):
+                    return [x for x in v if isinstance(x, dict)]
+                if isinstance(v, dict):
+                    found = find_events_recursive(v, depth + 1)
                     if found:
                         return found
-        for k, v in obj.items():
+        # generic descent
+        for v in obj.values():
             if isinstance(v, (dict, list)):
                 found = find_events_recursive(v, depth + 1)
                 if found:
                     return found
     return []
 
-# -------------------------------------------------------------------
-# CROSS-BOOKMAKER ARBITRAGE CALCULATOR
-# -------------------------------------------------------------------
+# Cross-bookmaker arbitrage
 def find_arbitrage_opportunities(all_matches: List[Dict[str, Any]], bankroll: float = 100000.0) -> List[Dict[str, Any]]:
-    grouped_events: Dict[str, List[Dict[str, Any]]] = {}
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
     for m in all_matches:
         if not isinstance(m, dict):
             continue
@@ -338,20 +323,22 @@ def find_arbitrage_opportunities(all_matches: List[Dict[str, Any]], bankroll: fl
         if not home or not away:
             continue
         key = generate_event_fingerprint(home, away, sport)
-        grouped_events.setdefault(key, []).append(m)
+        grouped.setdefault(key, []).append(m)
 
-    opportunities = []
-    for key, matches in grouped_events.items():
+    opportunities: List[Dict[str, Any]] = []
+    for key, matches in grouped.items():
         valid_matches = [m for m in matches if isinstance(m, dict)]
         if len(valid_matches) < 2:
             continue
         distinct_bookies = set(str(m.get("bookmaker_id")) for m in valid_matches if m.get("bookmaker_id"))
         if len(distinct_bookies) < 2:
             continue
+
         sport = valid_matches[0].get("sport", "soccer")
         home_name = valid_matches[0].get("home_team", "").strip()
         away_name = valid_matches[0].get("away_team", "").strip()
         competition = valid_matches[0].get("competition", "Unknown")
+
         best_home = max([m for m in valid_matches if m.get("home_odds") is not None], key=lambda x: x.get("home_odds") or 0, default=None)
         best_away = max([m for m in valid_matches if m.get("away_odds") is not None], key=lambda x: x.get("away_odds") or 0, default=None)
         o1 = best_home.get("home_odds") if best_home else None
@@ -359,19 +346,18 @@ def find_arbitrage_opportunities(all_matches: List[Dict[str, Any]], bankroll: fl
         if not o1 or not o2:
             continue
 
-        # 1) 2-WAY ARBITRAGE
-        if sport in ["tennis", "basketball", "volleyball", "mma", "table_tennis", "baseball", "darts", "handball"]:
+        if sport in ["tennis","basketball","volleyball","mma","table_tennis","baseball","darts","handball"]:
             if str(best_home.get("bookmaker_id")) == str(best_away.get("bookmaker_id")):
                 continue
             arb_margin = (1.0 / o1) + (1.0 / o2)
             if 0.85 < arb_margin < 1.0:
                 profit_pct = round((1.0 - arb_margin) * 100, 2)
-                stake_1 = round(bankroll / (o1 * arb_margin), -1)
-                stake_2 = round(bankroll / (o2 * arb_margin), -1)
-                total_invested = stake_1 + stake_2
-                payout_1 = round(stake_1 * o1, 2)
-                payout_2 = round(stake_2 * o2, 2)
-                min_payout = min(payout_1, payout_2)
+                stake1 = round(bankroll / (o1 * arb_margin), -1)
+                stake2 = round(bankroll / (o2 * arb_margin), -1)
+                total_invested = stake1 + stake2
+                payout1 = round(stake1 * o1, 2)
+                payout2 = round(stake2 * o2, 2)
+                min_payout = min(payout1, payout2)
                 net_profit = round(min_payout - total_invested, 2)
                 opportunities.append({
                     "sport": sport.upper(),
@@ -383,48 +369,38 @@ def find_arbitrage_opportunities(all_matches: List[Dict[str, Any]], bankroll: fl
                     "guaranteed_net_profit": net_profit,
                     "guaranteed_payout": min_payout,
                     "legs": [
-                        {
-                            "outcome": f"1 ({home_name})",
-                            "bookmaker": str(best_home.get("bookmaker_id", "")).upper(),
-                            "odds": o1,
-                            "recommended_stake": stake_1,
-                            "expected_payout": payout_1
-                        },
-                        {
-                            "outcome": f"2 ({away_name})",
-                            "bookmaker": str(best_away.get("bookmaker_id", "")).upper(),
-                            "odds": o2,
-                            "recommended_stake": stake_2,
-                            "expected_payout": payout_2
-                        }
-                    ]
+                        {"outcome": f"1 ({home_name})", "bookmaker": str(best_home.get("bookmaker_id","")).upper(),
+                         "odds": o1, "recommended_stake": stake1, "expected_payout": payout1},
+                        {"outcome": f"2 ({away_name})", "bookmaker": str(best_away.get("bookmaker_id","")).upper(),
+                         "odds": o2, "recommended_stake": stake2, "expected_payout": payout2},
+                    ],
                 })
-        # 2) 3-WAY ARBITRAGE
         else:
-            best_draw = max([m for m in valid_matches if m.get("draw_odds") is not None], key=lambda x: x.get("draw_odds") or 0, default=None)
+            best_draw = max([m for m in valid_matches if m.get("draw_odds") is not None],
+                            key=lambda x: x.get("draw_odds") or 0, default=None)
             if not best_draw:
                 continue
             oX = best_draw.get("draw_odds")
             if not oX:
                 continue
-            used_bookies = set([
+            used_bookies = {
                 str(best_home.get("bookmaker_id")),
                 str(best_draw.get("bookmaker_id")),
-                str(best_away.get("bookmaker_id"))
-            ])
+                str(best_away.get("bookmaker_id")),
+            }
             if len(used_bookies) < 2:
                 continue
             arb_margin = (1.0 / o1) + (1.0 / oX) + (1.0 / o2)
             if 0.85 < arb_margin < 1.0:
                 profit_pct = round((1.0 - arb_margin) * 100, 2)
-                stake_1 = round(bankroll / (o1 * arb_margin), -1)
-                stake_X = round(bankroll / (oX * arb_margin), -1)
-                stake_2 = round(bankroll / (o2 * arb_margin), -1)
-                total_invested = stake_1 + stake_X + stake_2
-                payout_1 = round(stake_1 * o1, 2)
-                payout_X = round(stake_X * oX, 2)
-                payout_2 = round(stake_2 * o2, 2)
-                min_payout = min(payout_1, payout_X, payout_2)
+                stake1 = round(bankroll / (o1 * arb_margin), -1)
+                stakeX = round(bankroll / (oX * arb_margin), -1)
+                stake2 = round(bankroll / (o2 * arb_margin), -1)
+                total_invested = stake1 + stakeX + stake2
+                payout1 = round(stake1 * o1, 2)
+                payoutX = round(stakeX * oX, 2)
+                payout2 = round(stake2 * o2, 2)
+                min_payout = min(payout1, payoutX, payout2)
                 net_profit = round(min_payout - total_invested, 2)
                 opportunities.append({
                     "sport": sport.upper(),
@@ -436,141 +412,34 @@ def find_arbitrage_opportunities(all_matches: List[Dict[str, Any]], bankroll: fl
                     "guaranteed_net_profit": net_profit,
                     "guaranteed_payout": min_payout,
                     "legs": [
-                        {
-                            "outcome": f"1 ({home_name})",
-                            "bookmaker": str(best_home.get("bookmaker_id", "")).upper(),
-                            "odds": o1,
-                            "recommended_stake": stake_1,
-                            "expected_payout": payout_1
-                        },
-                        {
-                            "outcome": "X (Draw)",
-                            "bookmaker": str(best_draw.get("bookmaker_id", "")).upper(),
-                            "odds": oX,
-                            "recommended_stake": stake_X,
-                            "expected_payout": payout_X
-                        },
-                        {
-                            "outcome": f"2 ({away_name})",
-                            "bookmaker": str(best_away.get("bookmaker_id", "")).upper(),
-                            "odds": o2,
-                            "recommended_stake": stake_2,
-                            "expected_payout": payout_2
-                        }
-                    ]
+                        {"outcome": f"1 ({home_name})", "bookmaker": str(best_home.get("bookmaker_id","")).upper(),
+                         "odds": o1, "recommended_stake": stake1, "expected_payout": payout1},
+                        {"outcome": "X (Draw)", "bookmaker": str(best_draw.get("bookmaker_id","")).upper(),
+                         "odds": oX, "recommended_stake": stakeX, "expected_payout": payoutX},
+                        {"outcome": f"2 ({away_name})", "bookmaker": str(best_away.get("bookmaker_id","")).upper(),
+                         "odds": o2, "recommended_stake": stake2, "expected_payout": payout2},
+                    ],
                 })
-    # Improve: robust dedup across matches
-    # Use a fingerprint map to deduplicate
+
+    # Lightweight dedup across opportunities
     deduped: Dict[str, Dict[str, Any]] = {}
-    for m in opportunities:
-        k = f"{m['sport']}|{m['competition']}|{m['event']}"
-        if k not in deduped or m.get("profit_margin_pct", 0) > deduped[k].get("profit_margin_pct", 0):
-            deduped[k] = m
+    for o in opportunities:
+        key = f"{o['sport']}|{o['competition']}|{o['event']}"
+        if key not in deduped or o.get("profit_margin_pct", 0) > deduped[key].get("profit_margin_pct", 0):
+            deduped[key] = o
     return list(deduped.values())
 
 # -------------------------------------------------------------------
-# BOOKMAKER REGISTRY (Minimal default; can be overridden by bookmakers.yaml)
+# BOOKMAKER REGISTRY
 # -------------------------------------------------------------------
 DEFAULT_BOOKMAKER_REGISTRY: Dict[str, Dict[str, Any]] = {
-    # Minimal example; you can override/add more via bookmakers.yaml
     "betika": {"platform": "public_rest", "url": "https://api.betika.com/v1/uo/matches?limit=100&sub_type=prematch", "parser": "betika", "timeout": 8},
+    "sportybet": {"platform": "public_rest", "url": "https://www.sportybet.com/api/tz/factsCenter/pcUpcomingEvents?pageSize=100&pageNum=1&option=1", "parser": "sportybet", "timeout": 8},
+    "bangbet": {"platform": "public_rest", "url": "https://bet-api.bangbet.com/api/bet/match/listTop?country=tz", "parser": "bangbet", "timeout": 8},
+    "leonbet": {"platform": "public_rest", "url": "https://leonbet.co.tz/api-2/betline/events/all?ctag=en-US", "parser": "leonbet", "timeout": 25},
+    "premierbet": {"platform": "public_rest", "url": "https://sports-api.premierbet.co.tz/v1/events/highlights?country=TZ&group=g2&platform=desktop&locale=sw&limit=100", "parser": "premierbet", "timeout": 8},
     "meridianbet": {"platform": "public_rest", "url": "https://online.meridianbet.co.tz/api/v2/events/standard", "parser": "meridianbet", "timeout": 10},
-    "1xcorp-demo": {"platform": "public_rest", "url": "https://example.com/api/v1/matches", "parser": "1xcorp", "timeout": 8},
-}
-
-# Load external overrides (if bookmakers.yaml exists)
-BOOKMAKER_REGISTRY = load_external_registry(DEFAULT_BOOKMAKER_REGISTRY)
-BOOKMAKER_MAP = {bm: None for bm in BOOKMAKER_REGISTRY.keys()}
-
-# -------------------------------------------------------------------
-# PARSER ENGINE
-# -------------------------------------------------------------------
-def parse_raw_payload(bookmaker_id: str, payload: Any, latency_ms: int = 0) -> List[Dict[str, Any]]:
-    ts = int(time.time())
-    config = BOOKMAKER_REGISTRY.get(bookmaker_id, {})
-    parser_type = config.get("parser", "generic")
-    raw_parsed: List[Dict[str, Any]] = []
-
-    try:
-        if not isinstance(payload, (dict, list)):
-            return []
-        if isinstance(payload, dict) and any(str(k).startswith("-1") for k in payload.keys()):
-            return []
-
-        # 1) 1XCORP Clone
-        if parser_type == "1xcorp":
-            events = []
-            if isinstance(payload, list):
-                events = payload
-            elif isinstance(payload, dict):
-                val = payload.get("Value") or payload.get("data") or payload
-                if isinstance(val, dict):
-                    events = val.get("Events") or val.get("G") or val.get("Games") or val.get("E") or []
-                elif isinstance(val, list):
-                    events = val
-            for item in events:
-                if not isinstance(item, dict):
-                    continue
-                home = normalize_team_name(item.get("O1") or item.get("HT") or item.get("HomeTeam"))
-                away = normalize_team_name(item.get("O2") or item.get("AT") or item.get("AwayTeam"))
-                if not home or not away:
-                    raw_name = str(item.get("N") or item.get("Name") or "")
-                    if " - " in raw_name:
-                        parts = raw_name.split(" - ", 1)
-                        home, away = parts[0].strip(), parts[1].strip()
-                raw_sport_id = item.get("SI") or item.get("SportId") or item.get("SN")
-                detected_sport = resolve_sport_name(raw_sport_id)
-                competition = str(item.get("LE") or item.get("League") or item.get("L") or "Unknown")
-                o1, oX, o2 = None, None, None
-                raw_e = item.get("E") or item.get("Events") or item.get("Markets") or []
-                flat_outcomes: List[Any] = []
-                if isinstance(raw_e, list):
-                    for element in raw_e:
-                        if isinstance(element, list):
-                            flat_outcomes.extend(element)
-                        elif isinstance(element, dict):
-                            flat_outcomes.append(element)
-                for outcome in flat_outcomes:
-                    if not isinstance(outcome, dict):
-                        continue
-                    t = outcome.get("T") or outcome.get("Type")
-                    price = safe_float(outcome.get("C") or outcome.get("Coef") or outcome.get("Price"))
-                    if t in [1, "1"]:
-                        o1 = price
-                    elif t in [2, "2", "X"]:
-                        oX = price
-                    elif t in [3, "3", "2"]:
-                        o2 = price
-                if home and away:
-                    raw_parsed.append({
-                        "match_id": str(item.get("I") or item.get("ID") or item.get("Ci") or ""),
-                        "home_team": home, "away_team": away,
-                        "competition": competition,
-                        "home_odds": o1, "draw_odds": oX, "away_odds": o2,
-                        "sport": detected_sport, "market_type": "1X2" if oX is not None else "2WAY",
-                        "bookmaker_id": bookmaker_id, "timestamp": ts, "latency_ms": latency_ms
-                    })
-
-        # 2) MeridianBet
-        elif parser_type == "meridianbet":
-            events_list: List[Any] = []
-            if isinstance(payload, dict):
-                sports = payload.get("sports", []) or [payload]
-                for sport_obj in sports:
-                    if isinstance(sport_obj, dict):
-                        cats = sport_obj.get("categories", []) or [sport_obj]
-                        for cat in cats:
-                            if isinstance(cat, dict):
-                                tourneys = cat.get("tournaments", []) or [cat]
-                                for tourney in tourneys:
-                                    if isinstance(tourney, dict):
-                                        evs = tourney.get("events", [])
-                                        if isinstance(evs, list):
-                                            events_list.extend(evs)
-            elif isinstance(payload, list):
-                events_list = payload
-            for item in events_list:
-                if not isinstance(item, dict):
-                    continue
-                home = normalize_team_name(item.get("home") or item.get("homeTeam") or item.get("team1"))
-                away = normalize_team_name(item
+    # 1xCorp-like clones
+    "22bet": {"platform": "public_rest", "url": "https://22bet.co.tz/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en_GB&gr=329&mode=4&country=181&partner=151", "parser": "1xcorp", "timeout": 10},
+    "helabet": {"platform": "public_rest", "url": "https://helabet.co.tz/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en&gr=329&mode=4&country=181&partner=237", "parser": "1xcorp", "timeout": 10},
+    "betwinner": {"platform": "public_rest", "url": "https://betwinner.co.tz/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en&gr=329&mode
