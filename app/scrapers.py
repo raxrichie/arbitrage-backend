@@ -2,15 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-Robust Odds Scraper + Arbitrage Engine
+Arbitrage Radar - Production Odds Scraper & Surebet Engine
 
-- Supports Deploy-as-Web-Service (Render) or Background Worker modes.
+Supports:
+- Web Service Mode (FastAPI + Uvicorn) or Background Worker Mode.
 - External registry overrides via bookmakers.yaml.
-- Real-time WebSocket odds integration (stateful per bookmaker via CDP).
-- Exponential backoff and per-bookmaker proxy support for REST endpoints.
-- Extensible parser with strong recursive fallbacks.
-- Event fingerprinting and cross-bookmaker deduplication.
-- Enhanced Playwright handling (selectors, network idle, load-more).
+- CDP WebSocket frame interception for live streaming odds.
+- Direct REST fetching via curl_cffi Chrome impersonation with exponential backoff.
+- Recursive JSON scoring parser with team alias normalization.
 """
 
 import asyncio
@@ -24,7 +23,7 @@ from collections import Counter
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
-# Optional YAML for external config
+# Optional YAML for external config overrides
 try:
     import yaml  # type: ignore
 except ImportError:
@@ -32,7 +31,7 @@ except ImportError:
 
 from curl_cffi.requests import AsyncSession
 
-# Optional FastAPI for web mode
+# Optional FastAPI for Web Mode
 FASTAPI_AVAILABLE = False
 try:
     from fastapi import FastAPI
@@ -40,7 +39,7 @@ try:
 except ImportError:
     pass
 
-# Optional uvicorn for serving web mode
+# Optional Uvicorn for Web Server
 UVICORN_AVAILABLE = False
 try:
     import uvicorn
@@ -53,7 +52,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("scrapers")
 
 # -------------------------------------------------------------------
-# Feature Flags & Cache Configuration
+# Feature Flags & Environment Configuration
 # -------------------------------------------------------------------
 NETWORK_RECORDER = os.getenv("NETWORK_RECORDER", "false").lower() == "true"
 SAVE_DIAGNOSTICS = os.getenv("SAVE_DIAGNOSTICS", "true").lower() == "true"
@@ -72,13 +71,13 @@ IGNORE_JSON_KEYWORDS = (
     "feature", "consent", "cookies", "telemetry", "google-analytics", "facebook"
 )
 
-# Stealth Browser Initialization
+# Stealth Browser Initialization (Patchright preferred, Playwright fallback)
 try:
     from patchright.async_api import Browser, async_playwright
     logger.info("Using patchright for browser automation (stealth enabled).")
 except ImportError:
     from playwright.async_api import Browser, async_playwright
-    logger.warning("patchright not available; falling back to plain playwright.")
+    logger.warning("patchright not available; falling back to standard playwright.")
 
 DESKTOP_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -122,7 +121,7 @@ WEB_SOCKET_ODDS_STATE: Dict[str, Dict[str, Dict[str, Optional[float]]]] = {}
 
 
 # -------------------------------------------------------------------
-# ENDPOINT DISCOVERY & REGISTRY
+# ENDPOINT DISCOVERY & CACHE ENGINE
 # -------------------------------------------------------------------
 def load_endpoint_cache() -> Dict[str, Any]:
     if os.path.exists(CACHE_FILE):
@@ -189,8 +188,10 @@ def normalize_team_name(name: Any) -> str:
         "man united": "manchester united",
         "man city": "manchester city",
         "fc barcelona": "barcelona",
-        "fc madrid": "real madrid",
         "real madrid": "real madrid",
+        "ath madrid": "atletico madrid",
+        "spurs": "tottenham hotspur",
+        "tottenham": "tottenham hotspur",
     }
     return aliases.get(s, s)
 
@@ -494,38 +495,41 @@ def find_arbitrage_opportunities(all_matches: List[Dict[str, Any]], bankroll: fl
 # EXTENDED 25+ BOOKMAKER REGISTRY
 # -------------------------------------------------------------------
 DEFAULT_BOOKMAKER_REGISTRY: Dict[str, Dict[str, Any]] = {
-    # Direct Public REST APIs
+    # -------------------------------------------------------------------
+    # TIER 1: STABLE PUBLIC REST APIs (1,680+ Matches Baseline)
+    # -------------------------------------------------------------------
     "betika": {"platform": "public_rest", "url": "https://api.betika.com/v1/uo/matches?limit=100&sub_type=prematch", "parser": "betika", "timeout": 8},
     "sportybet": {"platform": "public_rest", "url": "https://www.sportybet.com/api/tz/factsCenter/pcUpcomingEvents?pageSize=100&pageNum=1&option=1", "parser": "sportybet", "timeout": 8},
     "bangbet": {"platform": "public_rest", "url": "https://bet-api.bangbet.com/api/bet/match/listTop?country=tz", "parser": "bangbet", "timeout": 8},
     "leonbet": {"platform": "public_rest", "url": "https://leonbet.co.tz/api-2/betline/events/all?ctag=en-US", "parser": "leonbet", "timeout": 25},
     "premierbet": {"platform": "public_rest", "url": "https://sports-api.premierbet.co.tz/v1/events/highlights?country=TZ&group=g2&platform=desktop&locale=sw&limit=100", "parser": "premierbet", "timeout": 8},
-    "wasafibet": {"platform": "public_rest", "url": "https://api.wasafibet.co.tz/v1/uo/matches?limit=100&sub_type=prematch", "parser": "betika", "timeout": 8},
-    "betpawa": {"platform": "public_rest", "url": "https://www.betpawa.co.tz/api/sportsbook/v1/events?sportId=1&limit=100", "parser": "generic", "timeout": 10},
 
-    # ALL 1XCORP CLONES (Direct REST Engine)
+    # -------------------------------------------------------------------
+    # TIER 2: 1XCORP CLONES (Direct REST Engine)
+    # -------------------------------------------------------------------
     "22bet": {"platform": "public_rest", "url": "https://22bet.co.tz/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en_GB&gr=329&mode=4&country=181&partner=151", "parser": "1xcorp", "timeout": 10},
     "helabet": {"platform": "public_rest", "url": "https://helabet.co.tz/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en&gr=329&mode=4&country=181&partner=237", "parser": "1xcorp", "timeout": 10},
     "betwinner": {"platform": "public_rest", "url": "https://betwinner.co.tz/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en&gr=329&mode=4&country=181&partner=777", "parser": "1xcorp", "timeout": 10},
     "1xbet": {"platform": "public_rest", "url": "https://1xbet.co.tz/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en&gr=329&mode=4&country=181&partner=1499", "parser": "1xcorp", "timeout": 10},
     "1xbit": {"platform": "public_rest", "url": "https://1xbit.com/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en&gr=329&mode=4&country=181&partner=933", "parser": "1xcorp", "timeout": 10},
     "megapari": {"platform": "public_rest", "url": "https://megapari.com/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en&gr=329&mode=4&country=181&partner=824", "parser": "1xcorp", "timeout": 10},
-    "melbet": {"platform": "public_rest", "url": "https://melbet.co.tz/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en&gr=329&mode=4&country=181&partner=1", "parser": "1xcorp", "timeout": 10},
-    "mostbet": {"platform": "public_rest", "url": "https://mostbet.com/api/v1/events?sport_id=1&limit=50", "parser": "generic", "timeout": 10},
 
-    # ALTENAR & SPORT-RADAR POWERED BOOKMAKERS
-    "sokabet": {"platform": "public_rest", "url": "https://sb2frontend-altenar2.gammastack.com/api/Sportsbook/GetTopEvents?culture=en-GB&timezoneOffset=-180&integration=sokabet&numevents=50", "parser": "generic", "timeout": 10},
-    "888bet": {"platform": "public_rest", "url": "https://888bet.tz/api/v1/sportsbook/highlights?sportId=1", "parser": "premierbet", "timeout": 10},
-    "pmbet": {"platform": "public_rest", "url": "https://pmbet.co.tz/api/v1/events/highlights?limit=50", "parser": "generic", "timeout": 10},
-    "winprincess": {"platform": "public_rest", "url": "https://winprincess.co.tz/api/v1/sportsbook/highlights", "parser": "generic", "timeout": 10},
-    "mozzartbet": {"platform": "public_rest", "url": "https://www.mozzartbet.co.tz/backend/v1/events/highlights", "parser": "generic", "timeout": 10},
-    "10bet": {"platform": "public_rest", "url": "https://10bet.co.tz/api/v1/sportsbook/highlights", "parser": "generic", "timeout": 10},
-
-    # PLAYWRIGHT SPA INTERCEPTORS
+    # -------------------------------------------------------------------
+    # TIER 3: PLAYWRIGHT SPA DISCOVERY TARGETS (Bypasses 404s & DNS issues)
+    # -------------------------------------------------------------------
     "sportpesa": {"platform": "playwright_spa", "url": "https://www.sportpesa.co.tz/en/sports-betting/football-1/", "keywords": ["/api/", "games", "upcoming", "highlights"], "parser": "sportybet"},
     "meridianbet": {"platform": "playwright_spa", "url": "https://meridianbet.co.tz/en/betting/football", "keywords": ["/api/", "/events/", "betsapi", "standard", "v2"], "parser": "meridianbet"},
     "mbet": {"platform": "playwright_spa", "url": "https://mbet.co.tz", "keywords": ["/api/", "sportsbook", "matches", "events"], "parser": "generic"},
     "1win": {"platform": "playwright_spa", "url": "https://1win.co.tz", "keywords": ["/api/", "sports", "football", "matches"], "parser": "generic"},
+    "sokabet": {"platform": "playwright_spa", "url": "https://www.sokabet.co.tz", "keywords": ["api", "events", "highlights", "GetTopEvents", "altenar"], "parser": "generic"},
+    "mozzartbet": {"platform": "playwright_spa", "url": "https://www.mozzartbet.co.tz", "keywords": ["backend", "events", "highlights"], "parser": "generic"},
+    "melbet": {"platform": "playwright_spa", "url": "https://melbet.co.tz", "keywords": ["LiveFeed", "Get1x2", "service-api"], "parser": "1xcorp"},
+    "betpawa": {"platform": "playwright_spa", "url": "https://www.betpawa.co.tz", "keywords": ["api", "events", "sportsbook"], "parser": "generic"},
+    "wasafibet": {"platform": "playwright_spa", "url": "https://wasafibet.co.tz", "keywords": ["api", "matches", "uo"], "parser": "betika"},
+    "10bet": {"platform": "playwright_spa", "url": "https://10bet.co.tz", "keywords": ["api", "sportsbook", "highlights"], "parser": "generic"},
+    "pmbet": {"platform": "playwright_spa", "url": "https://pmbet.co.tz", "keywords": ["api", "events", "highlights"], "parser": "generic"},
+    "winprincess": {"platform": "playwright_spa", "url": "https://winprincess.co.tz", "keywords": ["api", "sportsbook", "highlights"], "parser": "generic"},
+    "888bet": {"platform": "playwright_spa", "url": "https://888bet.tz", "keywords": ["api", "sportsbook", "highlights"], "parser": "premierbet"},
     "kingbet": {"platform": "playwright_spa", "url": "https://www.kingbet.co.tz/en/sportsbook/highlights", "keywords": ["redis_data", "home", "events", "sportsbook"], "parser": "generic"},
     "galsport": {"platform": "playwright_spa", "url": "https://gsb.co.tz/en/sportsbook/highlights", "keywords": ["/api/", "highlights", "events", "sportsbook", "get", "fixtures", "evapi"], "parser": "generic"},
     "parimatch": {"platform": "playwright_spa", "url": "https://parimatch.co.tz/en/football/prematch", "keywords": ["prematch", "sportsbook", "events", "line"], "parser": "generic"},
