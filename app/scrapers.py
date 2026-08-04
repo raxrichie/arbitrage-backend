@@ -143,7 +143,7 @@ def resolve_sport_name(raw_val: Any) -> str:
 
 def generate_event_fingerprint(home: str, away: str, sport: str) -> str:
     ignored_words = {"fc", "cf", "united", "city", "town", "real", "athletic", "club", "sc", "sporting", "st", "saint", "afc", "ec"}
-
+    
     def tokenize(name: str) -> List[str]:
         words = [w for w in "".join(c if c.isalnum() else " " for c in name.lower()).split() if len(w) > 1]
         meaningful = [w for w in words if w not in ignored_words]
@@ -429,7 +429,7 @@ def find_arbitrage_opportunities(all_matches: List[Dict[str, Any]], bankroll: fl
 
 
 # -------------------------------------------------------------------
-# BOOKMAKER REGISTRY
+# EXTENDED 25+ BOOKMAKER REGISTRY
 # -------------------------------------------------------------------
 
 BOOKMAKER_REGISTRY = {
@@ -439,8 +439,10 @@ BOOKMAKER_REGISTRY = {
     "bangbet": {"platform": "public_rest", "url": "https://bet-api.bangbet.com/api/bet/match/listTop?country=tz", "parser": "bangbet", "timeout": 8},
     "leonbet": {"platform": "public_rest", "url": "https://leonbet.co.tz/api-2/betline/events/all?ctag=en-US", "parser": "leonbet", "timeout": 25},
     "premierbet": {"platform": "public_rest", "url": "https://sports-api.premierbet.co.tz/v1/events/highlights?country=TZ&group=g2&platform=desktop&locale=sw&limit=100", "parser": "premierbet", "timeout": 8},
+    "wasafibet": {"platform": "public_rest", "url": "https://api.wasafibet.co.tz/v1/uo/matches?limit=100&sub_type=prematch", "parser": "betika", "timeout": 8},
+    "betpawa": {"platform": "public_rest", "url": "https://www.betpawa.co.tz/api/sportsbook/v1/events?sportId=1&limit=100", "parser": "generic", "timeout": 10},
 
-    # ALL 1XCORP CLONES (Direct REST)
+    # ALL 1XCORP CLONES (Direct REST Engine)
     "22bet": {"platform": "public_rest", "url": "https://22bet.co.tz/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en_GB&gr=329&mode=4&country=181&partner=151", "parser": "1xcorp", "timeout": 10},
     "helabet": {"platform": "public_rest", "url": "https://helabet.co.tz/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en&gr=329&mode=4&country=181&partner=237", "parser": "1xcorp", "timeout": 10},
     "betwinner": {"platform": "public_rest", "url": "https://betwinner.co.tz/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en&gr=329&mode=4&country=181&partner=777", "parser": "1xcorp", "timeout": 10},
@@ -448,8 +450,17 @@ BOOKMAKER_REGISTRY = {
     "1xbit": {"platform": "public_rest", "url": "https://1xbit.com/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en&gr=329&mode=4&country=181&partner=933", "parser": "1xcorp", "timeout": 10},
     "megapari": {"platform": "public_rest", "url": "https://megapari.com/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en&gr=329&mode=4&country=181&partner=824", "parser": "1xcorp", "timeout": 10},
     "melbet": {"platform": "public_rest", "url": "https://melbet.co.tz/service-api/LiveFeed/Get1x2_VZip?count=50&lng=en&gr=329&mode=4&country=181&partner=1", "parser": "1xcorp", "timeout": 10},
+    "mostbet": {"platform": "public_rest", "url": "https://mostbet.com/api/v1/events?sport_id=1&limit=50", "parser": "generic", "timeout": 10},
 
-    # Non-1XCorp SPA Targets via Stealth Playwright Interceptors
+    # ALTENAR & SPORT-RADAR POWERED BOOKMAKERS
+    "sokabet": {"platform": "public_rest", "url": "https://sb2frontend-altenar2.gammastack.com/api/Sportsbook/GetTopEvents?culture=en-GB&timezoneOffset=-180&integration=sokabet&numevents=50", "parser": "generic", "timeout": 10},
+    "888bet": {"platform": "public_rest", "url": "https://888bet.tz/api/v1/sportsbook/highlights?sportId=1", "parser": "premierbet", "timeout": 10},
+    "pmbet": {"platform": "public_rest", "url": "https://pmbet.co.tz/api/v1/events/highlights?limit=50", "parser": "generic", "timeout": 10},
+    "winprincess": {"platform": "public_rest", "url": "https://winprincess.co.tz/api/v1/sportsbook/highlights", "parser": "generic", "timeout": 10},
+    "mozzartbet": {"platform": "public_rest", "url": "https://www.mozzartbet.co.tz/backend/v1/events/highlights", "parser": "generic", "timeout": 10},
+    "10bet": {"platform": "public_rest", "url": "https://10bet.co.tz/api/v1/sportsbook/highlights", "parser": "generic", "timeout": 10},
+
+    # PLAYWRIGHT SPA INTERCEPTORS (WebSockets & CDP Extraction)
     "sportpesa": {"platform": "playwright_spa", "url": "https://www.sportpesa.co.tz/en/sports-betting/football-1/", "keywords": ["/api/", "games", "upcoming", "highlights"], "parser": "sportybet"},
     "meridianbet": {"platform": "playwright_spa", "url": "https://meridianbet.co.tz/en/betting/football", "keywords": ["/api/", "/events/", "betsapi", "standard", "v2"], "parser": "meridianbet"},
     "mbet": {"platform": "playwright_spa", "url": "https://mbet.co.tz", "keywords": ["/api/", "sportsbook", "matches", "events"], "parser": "generic"},
@@ -458,7 +469,6 @@ BOOKMAKER_REGISTRY = {
     "galsport": {"platform": "playwright_spa", "url": "https://gsb.co.tz/en/sportsbook/highlights", "keywords": ["/api/", "highlights", "events", "sportsbook", "get", "fixtures", "evapi"], "parser": "generic"},
     "parimatch": {"platform": "playwright_spa", "url": "https://parimatch.co.tz/en/football/prematch", "keywords": ["prematch", "sportsbook", "events", "line"], "parser": "generic"},
     "betway": {"platform": "playwright_spa", "url": "https://www.betway.co.tz", "keywords": ["highlights", "sportsapi", "event", "betbook"], "parser": "generic"},
-    "sokabet": {"platform": "playwright_spa", "url": "https://sokabet.co.tz", "keywords": ["api", "events", "highlights", "GetTopEvents", "altenar"], "parser": "generic"},
 }
 
 BOOKMAKER_MAP = {bm: None for bm in BOOKMAKER_REGISTRY.keys()}
@@ -891,7 +901,7 @@ async def fetch_http_api(session: AsyncSession, bookmaker_id: str, config: dict,
 
 
 # -------------------------------------------------------------------
-# ADVANCED PLAYWRIGHT INTERCEPTOR WITH SSL BYPASS & SPLIT TIMEOUTS
+# ADVANCED PLAYWRIGHT INTERCEPTOR WITH SSL BYPASS, CDP WEBSOCKETS & SPLIT TIMEOUTS
 # -------------------------------------------------------------------
 
 async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: dict, discovery_timeout: float = 20.0) -> List[Dict[str, Any]]:
@@ -929,10 +939,29 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
 
             page = await context.new_page()
 
-            # 1. Track Timestamped Frame Navigations
-            page.on("framenavigated", lambda frame: redirect_chain.append({"time": round(time.perf_counter() - start_t, 2), "url": frame.url}) if (frame == page.main_frame) else None)
+            # 1. CDP Session for Live WebSocket Frame Extraction
+            try:
+                cdp = await page.context.new_cdp_session(page)
+                await cdp.send("Network.enable")
 
-            # 2. Track WebSockets
+                def on_ws_frame(event):
+                    payload = event.get("response", {}).get("payloadData", "")
+                    if payload and len(payload) > 50:
+                        score = score_sportsbook_payload(payload)
+                        if score > 10:
+                            try:
+                                data = json.loads(payload)
+                                captured_payloads.append((page.url, data))
+                                logger.info(f"[{bm_label}-WS-EXTRACTED] Intercepted live odds WebSocket frame.")
+                            except Exception:
+                                pass
+
+                cdp.on("Network.webSocketFrameReceived", on_ws_frame)
+            except Exception as e:
+                logger.warning(f"[{bm_label}-CDP-WARNING] Could not attach CDP session: {repr(e)}")
+
+            # 2. Track Frame Navigations & WebSockets
+            page.on("framenavigated", lambda frame: redirect_chain.append({"time": round(time.perf_counter() - start_t, 2), "url": frame.url}) if (frame == page.main_frame) else None)
             page.on("websocket", lambda ws: websockets_log.append(ws.url))
 
             # 3. Route Interceptor
@@ -949,7 +978,7 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
 
             await page.route("**/*", handle_route)
 
-            # 4. Filter Noise BEFORE Structural Scoring
+            # 4. Response Filter & Dynamic Scoring
             async def handle_response(response):
                 if response.status in [200, 203]:
                     res_url = response.url.lower()
@@ -966,7 +995,7 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
                     if not any(ext in res_url for ext in [".css", ".png", ".jpg", ".jpeg", ".svg", ".woff", ".ico", ".gif"]):
                         responses_log.append({"url": response.url, "status": response.status, "content_type": content_type, "size_bytes": content_length})
 
-                    if "json" in content_type:
+                    if any(ct in content_type for ct in ["json", "text/plain", "text/javascript"]):
                         try:
                             json_data = await response.json()
                             if json_data:
@@ -998,14 +1027,14 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
             page.on("response", handle_response)
             logger.info(f"[{bm_label}-INTERCEPTOR] Navigating to target: {url}...")
 
-            # 5. Split Navigation Execution: wait_until="commit" with 30s Timeout
+            # 5. Navigation Execution
             nav_start = time.perf_counter()
             try:
                 await page.goto(url, wait_until="commit", timeout=30000)
                 nav_duration = time.perf_counter() - nav_start
                 logger.info(f"[{bm_label}-LANDED] Target: {url} | Final URL: {page.url} | Nav Completed in {nav_duration:.2f}s")
 
-                # 6. Separate Discovery Polling Timeout Loop (20s)
+                # 6. Discovery Polling & Scroll Loop
                 deadline = time.time() + discovery_timeout
                 while time.time() < deadline:
                     if len(captured_payloads) > 0:
@@ -1042,7 +1071,7 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
             unique_matches = list({f"{m['bookmaker_id']}_{m['match_id']}": m for m in all_matches if isinstance(m, dict) and m.get("match_id")}.values()) if all_matches else []
             logger.info(f"[{bm_label}-SUMMARY] Captured {len(captured_payloads)} total payloads, parsed {len(unique_matches)} unique matches.")
 
-            # 9. Forensic Artifact Dump (Only executed when SAVE_DIAGNOSTICS=true on 0 matches)
+            # 9. Forensic Artifact Dump
             if SAVE_DIAGNOSTICS and len(unique_matches) == 0:
                 bm_dir = os.path.join(DIAGNOSTICS_DIR, bookmaker_id)
                 os.makedirs(bm_dir, exist_ok=True)
@@ -1068,7 +1097,6 @@ async def intercept_playwright_spa(browser: Browser, bookmaker_id: str, config: 
                 with open(os.path.join(bm_dir, "report.json"), "w", encoding="utf-8") as f:
                     json.dump(diagnostic_artifact, f, indent=2)
 
-                # Save compressed HTML page
                 if html_content:
                     with open(os.path.join(bm_dir, "page.html.gz"), "wb") as f:
                         f.write(zlib.compress(html_content.encode("utf-8")))
