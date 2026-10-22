@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: arbradar
+    runtime: docker
+    rootDir: arbradar
+    dockerfilePath: ./Dockerfile
+    plan: standard
+    region: singapore
+    healthCheckPath: /health
+    autoDeploy: true
+    disk:
+      name: arbradar-reports
+      mountPath: /app/reports
+      sizeGB: 1

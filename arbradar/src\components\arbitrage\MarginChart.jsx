@@ -1,0 +1,9 @@
+import React from "react";
+import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+
+export default function MarginChart({ marginHistory = [] }) {
+  const data = marginHistory.map((entry, index) => ({ label: entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : `Point ${index + 1}`, margin: Number(entry.margin) || 0 }));
+  return (
+    <section className="rounded-xl border border-border bg-card p-4 shadow-xs"><div className="mb-4"><h2 className="text-sm font-semibold text-foreground">Margin history</h2><p className="mt-0.5 text-[10px] text-muted-foreground">Recorded arbitrage margin over time</p></div>{data.length ? <div className="h-56" role="img" aria-label="Arbitrage margin history chart"><ResponsiveContainer width="100%" height="100%"><AreaChart data={data} margin={{ top: 10, right: 10, left: -18, bottom: 0 }}><defs><linearGradient id="marginFill" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#10b981" stopOpacity={0.28} /><stop offset="95%" stopColor="#10b981" stopOpacity={0} /></linearGradient></defs><CartesianGrid strokeDasharray="3 3" className="stroke-border" /><XAxis dataKey="label" tickLine={false} axisLine={false} tick={{ fontSize: 10 }} className="fill-muted-foreground" /><YAxis tickLine={false} axisLine={false} tick={{ fontSize: 10 }} className="fill-muted-foreground" tickFormatter={(value) => `${value}%`} /><Tooltip formatter={(value) => [`${Number(value).toFixed(2)}%`, "Margin"]} /><Area type="monotone" dataKey="margin" stroke="#10b981" strokeWidth={2} fill="url(#marginFill)" /></AreaChart></ResponsiveContainer></div> : <div className="flex h-56 items-center justify-center rounded-lg bg-muted/35 text-sm text-muted-foreground">Margin history will appear as collectors record updates.</div>}</section>
+  );
+}

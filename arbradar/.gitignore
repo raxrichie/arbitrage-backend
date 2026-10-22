@@ -1,0 +1,12 @@
+# Runtime output and local-only files
+reports/
+node_modules/
+dist/
+.venv/
+.env*
+__pycache__/
+*.py[cod]
+
+# The repository root ignores package manifests globally; keep these app files tracked.
+!package.json
+!package-lock.json
