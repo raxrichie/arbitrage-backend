@@ -3,6 +3,7 @@ WORKDIR /build
 COPY package*.json ./
 RUN npm ci
 COPY index.html vite.config.js postcss.config.js tailwind.config.js ./
+COPY public ./public
 COPY src ./src
 RUN npm run build
 

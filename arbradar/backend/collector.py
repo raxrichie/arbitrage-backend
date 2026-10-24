@@ -1,6 +1,7 @@
 ﻿import json
 from pathlib import Path
 
+from backend.utils.atomic import replace_with_retry
 from backend.collectors.sites import SITE_IDS
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -18,5 +19,5 @@ def save_odds(site: str, odds_data: dict):
     temporary = file.with_suffix(".tmp")
     with temporary.open("w", encoding="utf-8") as handle:
         json.dump(odds_data, handle, ensure_ascii=False, indent=2)
-    temporary.replace(file)
+    replace_with_retry(temporary, file)
     print(f"Odds saved for {site}")

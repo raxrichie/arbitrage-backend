@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 import asyncio
 import json
 
-from backend.services.arb_engine import ENGINE_REPORT, MAX_ARB_ODDS_AGE, MAX_ODDS_AGE, build_engine_data, write_engine_report
+from backend.services.arb_engine import ENGINE_REPORT, MAX_ARB_ODDS_AGE, MAX_ODDS_AGE, build_engine_data, fixture_compliance_checks, write_engine_report
 from backend.collectors.metadata import group_bookmakers
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -54,6 +54,7 @@ def normalize_arb(arb: dict) -> dict:
         },
         "market": arb.get("market", "1x2"),
         "sport": arb.get("sport", ""),
+        "startTime": arb.get("startTime"),
         "selections": arb.get("selections", []),
     }
 
@@ -129,6 +130,7 @@ def merge_engine_payload(primary: dict, supplemental: dict) -> dict:
         "sourceCount": source_count,
         "sources": sources,
         "diagnostics": diagnostics,
+        "complianceChecks": primary.get("complianceChecks") or supplemental.get("complianceChecks") or fixture_compliance_checks(),
         "nearMisses": near_misses,
         "sourceFamilies": group_bookmakers(sources),
         "collectorHealth": collector_health,

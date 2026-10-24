@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -17,6 +17,7 @@ from playwright.sync_api import sync_playwright
 
 from backend.collector import save_odds
 from backend.collectors.metadata import bookmaker_family
+from backend.utils.atomic import replace_with_retry
 from backend.utils.playwright_browser import launch_sync_browser
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -25,7 +26,8 @@ COLLECTOR_HEALTH = PROJECT_ROOT / "reports" / "collector-health.json"
 SIMULATED_EVENT_TERMS = (
     "virtual", "simulated", "simulation", "simulator", "e-soccer", "esoccer",
     "e-football", "efootball", "e-basketball", "ebasketball", "e-tennis", "etennis",
-    "virtual sports", "cyber football",
+    "virtual sports", "cyber", "esports", "e-sports", "v-football", "v football",
+    "fifae", "fifa esports", "fifa e-sports",
 )
 
 
@@ -34,6 +36,9 @@ def is_real_sports_event(event: dict) -> bool:
     searchable = " ".join((
         str(event.get("name", "")), str(event.get("sport", "")),
         str(event.get("league", "")), str(event.get("competition", "")),
+        str(event.get("category", "")), str(event.get("tournament", "")),
+        str(event.get("provider", "")), str(event.get("providerName", "")),
+        str(event.get("url", "")), str(event.get("eventUrl", "")),
     )).casefold()
     return not any(term in searchable for term in SIMULATED_EVENT_TERMS)
 
@@ -46,6 +51,14 @@ def get_json(url: str, timeout: int = 20, headers: dict | None = None) -> dict:
                 return json.load(response)
         except HTTPError as error:
             if error.code not in {500, 502, 503, 504} or attempt == 2:
+                raise
+            time.sleep(0.5 * (attempt + 1))
+        except (URLError, TimeoutError, ConnectionError, OSError, json.JSONDecodeError):
+            # Public feeds occasionally reset or truncate connections while
+            # several independent bookmakers are being polled. Retry those
+            # transient transport failures, then expose a real failure to the
+            # per-bookmaker health report after the final attempt.
+            if attempt == 2:
                 raise
             time.sleep(0.5 * (attempt + 1))
 
@@ -65,7 +78,7 @@ def persist_collector_health(health: dict) -> None:
     COLLECTOR_HEALTH.parent.mkdir(parents=True, exist_ok=True)
     temporary = COLLECTOR_HEALTH.with_name(f"collector-health.{os.getpid()}.{time.time_ns()}.tmp")
     temporary.write_text(json.dumps(health, indent=2), encoding="utf-8")
-    temporary.replace(COLLECTOR_HEALTH)
+    replace_with_retry(temporary, COLLECTOR_HEALTH)
 
 
 def read_collector_health() -> dict:
@@ -99,12 +112,23 @@ def collect_betika() -> dict:
     """Collect primary markets for all sports exposed by Betika's public feed."""
     sport_ids = (1, 2, 3, 4, 5, 6, 7)  # basketball, hockey, tennis, handball, soccer, table tennis, volleyball
     events = []
-    for sport_id in sport_ids:
+
+    def fetch_sport(sport_id: int) -> tuple[int, list[dict]]:
         url = (
             "https://api.betika.co.tz/v1/uo/matches?"
             f"sport_id={sport_id}&page=1&limit=100&keyword=&tab=&sub_type_id=1,186&tag_id=&country_id=1&language=en"
         )
-        for item in get_json(url).get("data", []):
+        try:
+            return sport_id, get_json(url, timeout=8).get("data", [])
+        except Exception as error:
+            print(f"Betika sport {sport_id} feed failed this cycle: {type(error).__name__}: {error}")
+            return sport_id, []
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        sport_feeds = list(executor.map(fetch_sport, sport_ids))
+
+    for sport_id, items in sport_feeds:
+        for item in items:
             home, away = item.get("home_team"), item.get("away_team")
             if not home or not away:
                 continue
@@ -192,7 +216,7 @@ def collect_premierbet() -> dict:
     with sync_playwright() as playwright:
         browser = launch_sync_browser(playwright)
         page = browser.new_page(viewport={"width": 1440, "height": 900}, locale="sw-TZ")
-        page.goto("https://premierbet.co.tz", wait_until="domcontentloaded", timeout=30_000)
+        page.goto("https://premierbet.co.tz", wait_until="domcontentloaded", timeout=60_000)
         feeds = page.evaluate(
             """async ({cmsUrl, date}) => {
                 const sports = await fetch(cmsUrl).then(r => r.json());
@@ -471,7 +495,7 @@ def collect_thronebet() -> dict:
     with sync_playwright() as playwright:
         browser = launch_sync_browser(playwright)
         page = browser.new_page(locale="en-TZ")
-        page.goto("https://thronebet.com/", wait_until="domcontentloaded", timeout=35_000)
+        page.goto("https://thronebet.com/", wait_until="domcontentloaded", timeout=60_000)
 
         def make_query(query: str):
             body = [{"module": "graphs", "method": "makeQuery", "options": {"query": query}}]
@@ -556,15 +580,13 @@ def collect_linefeed(site: str, domain: str) -> dict:
     def fetch_sport(entry: tuple[int, str]) -> dict:
         sport_id, sport_name = entry
         url = f"{base}?sports={sport_id}&{params}"
-        for attempt in range(3):
-            try:
-                data = get_json(url, timeout=60 if site == "megapari" else 20)
-                return {"id": sport_id, "name": sport_name, "value": data.get("Value", [])}
-            except Exception as error:
-                if attempt == 2:
-                    return {"id": sport_id, "name": sport_name, "error": f"{type(error).__name__}: {error}", "value": []}
-                time.sleep(0.4 * (attempt + 1))
-        return {"id": sport_id, "name": sport_name, "value": []}
+        try:
+            # get_json already retries transient transport failures; do not
+            # wrap it in a second retry loop (which multiplied wait times).
+            data = get_json(url, timeout=60 if site == "megapari" else 20)
+            return {"id": sport_id, "name": sport_name, "value": data.get("Value", [])}
+        except Exception as error:
+            return {"id": sport_id, "name": sport_name, "error": f"{type(error).__name__}: {error}", "value": []}
 
     # Fetch feeds directly to avoid site-page navigation/CORS failures on clone skins.
     with ThreadPoolExecutor(max_workers=3) as executor:
@@ -1005,8 +1027,16 @@ def collect_betpawa() -> dict:
                 # The event list is lazy-loaded. Scroll the sport-specific page to expose more upcoming fixtures.
                 event_cards = page.locator('a[data-test-id="bp-event"]')
                 for _ in range(8):
-                    event_cards.last.scroll_into_view_if_needed(timeout=3000)
-                    page.wait_for_timeout(600)
+                    try:
+                        if event_cards.count() == 0:
+                            break
+                        event_cards.last.scroll_into_view_if_needed(timeout=3000)
+                        page.wait_for_timeout(400)
+                    except Exception as error:
+                        # A lazy-load scroll timeout should not discard the
+                        # cards already rendered for this sport.
+                        print(f"BetPawa {sport_name} lazy-load stopped; keeping loaded events: {type(error).__name__}")
+                        break
                 cards = page.locator('a[data-test-id="bp-event"]').evaluate_all("""els => els.map(e => ({
                     href: e.getAttribute('href') || '',
                     dateText: e.querySelector('[class*="SportEvents_eventMatch"] .text-sm')?.innerText.trim() || '',
@@ -1114,9 +1144,20 @@ def collect_sportybet() -> dict:
         "sr%3Asport%3A111": "Esports Dota 2", "sr%3Asport%3A110": "Esports League of Legends",
     }
     market_ids = "1%2C18%2C10%2C14%2C29%2C11%2C26%2C36%2C60100"
-    for sport_id, sport_name in sports.items():
+    def fetch_sport(entry: tuple[str, str]) -> tuple[str, dict]:
+        sport_id, sport_name = entry
         url = f"https://www.sportybet.com/api/tz/factsCenter/pcUpcomingEvents?sportId={sport_id}&marketId={market_ids}&pageSize=100&pageNum=1&option=1"
-        for tournament in get_json(url).get("data", {}).get("tournaments", []):
+        try:
+            return sport_name, get_json(url, timeout=6)
+        except Exception as error:
+            print(f"SportyBet {sport_name} feed failed this cycle: {type(error).__name__}: {error}")
+            return sport_name, {}
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        sport_feeds = list(executor.map(fetch_sport, sports.items()))
+
+    for sport_name, feed in sport_feeds:
+        for tournament in feed.get("data", {}).get("tournaments", []):
             for item in tournament.get("events", []):
                 home, away = item.get("homeTeamName"), item.get("awayTeamName")
                 if not home or not away:

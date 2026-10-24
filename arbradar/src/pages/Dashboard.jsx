@@ -1,6 +1,6 @@
 // src/pages/Dashboard.jsx
 import React, { useState, useEffect } from "react";
-import { Radar, TrendingUp, Activity, Layers, Sun, Moon, Info } from "lucide-react";
+import { Radar, TrendingUp, Activity, Layers, Sun, Moon, Info, Download } from "lucide-react";
 import { useArbEngine } from "@/hooks/useArbEngine";
 import { useTheme } from "@/hooks/useTheme";
 import ArbTable from "@/components/arbitrage/ArbTable";
@@ -12,8 +12,52 @@ function fmt(n) {
   return n.toLocaleString("en-US", { maximumFractionDigits: 0 });
 }
 
+function InstallAppControl() {
+  const [installPrompt, setInstallPrompt] = useState(null);
+  const [showHelp, setShowHelp] = useState(false);
+  const [isInstalled, setIsInstalled] = useState(() => window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true);
+
+  useEffect(() => {
+    const capturePrompt = (event) => {
+      event.preventDefault();
+      setInstallPrompt(event);
+    };
+    const markInstalled = () => setIsInstalled(true);
+    window.addEventListener("beforeinstallprompt", capturePrompt);
+    window.addEventListener("appinstalled", markInstalled);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", capturePrompt);
+      window.removeEventListener("appinstalled", markInstalled);
+    };
+  }, []);
+
+  const install = async () => {
+    if (!installPrompt) {
+      setShowHelp(true);
+      return;
+    }
+    await installPrompt.prompt();
+    setInstallPrompt(null);
+  };
+
+  if (isInstalled) return null;
+
+  return <>
+    <button onClick={install} className="flex h-8 items-center gap-1.5 rounded-xl border border-border bg-muted px-2.5 text-[11px] font-medium text-foreground hover:bg-accent" title="Install ArbRadar on this device">
+      <Download className="h-3.5 w-3.5" /><span className="hidden sm:inline">Install app</span>
+    </button>
+    {showHelp && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowHelp(false); }}>
+      <section role="dialog" aria-modal="true" aria-labelledby="install-help-title" className="w-full max-w-sm rounded-xl border border-border bg-card p-5 text-sm shadow-xl">
+        <h2 id="install-help-title" className="font-semibold text-foreground">Install ArbRadar</h2>
+        <p className="mt-2 text-muted-foreground">Use your browser menu to install this app. On iPhone or iPad, open the Share menu and choose “Add to Home Screen.”</p>
+        <button onClick={() => setShowHelp(false)} className="mt-4 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white">Got it</button>
+      </section>
+    </div>}
+  </>;
+}
+
 export default function Dashboard() {
-  const { arbs, oddsChanges, marginHistory, sourceCount, isLive, diagnostics = {}, nearMisses = [], sourceFamilies = [], collectorHealth = {}, opportunityHistory = [], oldestOddsAt, lastOddsAt, oldestCurrentArbOddsAt, now = Date.now() } = useArbEngine();
+  const { arbs, oddsChanges, marginHistory, sourceCount, isLive, diagnostics = {}, complianceChecks = [], nearMisses = [], sourceFamilies = [], collectorHealth = {}, opportunityHistory = [], oldestOddsAt, lastOddsAt, oldestCurrentArbOddsAt, now = Date.now() } = useArbEngine();
   const { theme, toggleTheme } = useTheme();
   
   const [bankroll, setBankroll] = useState(() => {
@@ -57,6 +101,7 @@ export default function Dashboard() {
           </div>
           
           <div className="flex items-center gap-3">
+            <InstallAppControl />
             {/* Theme Toggle Button */}
             <button
               onClick={toggleTheme}
@@ -128,6 +173,17 @@ export default function Dashboard() {
             <p className="mt-2">{diagnostics.reason || "Waiting for the first engine scan."}</p>
             <p className="mt-1 text-[11px]">{diagnostics.oddsRows ?? 0} verified odds · {diagnostics.sources?.length ?? 0} sources · {diagnostics.matchingMarkets ?? 0} matching markets</p>
           </section>
+          <details className="rounded-xl border border-border bg-card p-4 text-xs text-muted-foreground">
+            <summary className="cursor-pointer font-semibold text-foreground">Fixture and odds safeguards · {complianceChecks.filter((check) => check.status === "missing").length} gaps</summary>
+            <p className="mt-1 text-[11px]">Review of the virtual-event filtering and data-quality criteria you listed. “Partial” means a limited check exists, not full verification.</p>
+            <div className="mt-3 space-y-2">
+              {complianceChecks.map((check) => <div className="flex items-start justify-between gap-3 border-t border-border/60 pt-2" key={check.name}>
+                <div className="min-w-0"><div className="font-medium text-foreground">{check.name}</div><div className="mt-0.5">{check.detail}</div></div>
+                <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${check.status === "implemented" ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" : check.status === "partial" ? "bg-amber-500/10 text-amber-600 dark:text-amber-400" : "bg-rose-500/10 text-rose-600 dark:text-rose-400"}`}>{check.status}</span>
+              </div>)}
+              {!complianceChecks.length && <p>Safeguard status will appear after the next engine scan.</p>}
+            </div>
+          </details>
           <section className="rounded-xl border border-border bg-card p-4 text-xs text-muted-foreground">
             <h3 className="font-semibold text-foreground">Bookmaker feed families</h3>
             <p className="mt-1 text-[11px]">Feeds grouped by the collection technology they share.</p>

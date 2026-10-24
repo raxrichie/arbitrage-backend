@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 
 const formatMoney = (value) =>
   new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value || 0);
@@ -22,6 +22,33 @@ function marketText(market) {
     .replace(/^over under (.+)$/i, "Over/Under $1");
 }
 
+function EventCountdown({ startTime }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const start = startTime ? new Date(startTime) : null;
+  if (!start || Number.isNaN(start.getTime())) {
+    return <div className="mt-2 text-[11px] text-muted-foreground">Event start time unavailable from this bookmaker feed.</div>;
+  }
+  const seconds = Math.floor((start.getTime() - now) / 1000);
+  const absolute = Math.abs(seconds);
+  const days = Math.floor(absolute / 86400);
+  const hours = Math.floor((absolute % 86400) / 3600);
+  const minutes = Math.floor((absolute % 3600) / 60);
+  const remainingSeconds = absolute % 60;
+  const countdown = `${days ? `${days}d ` : ""}${days || hours ? `${hours}h ` : ""}${minutes}m ${remainingSeconds}s`;
+  return (
+    <div className="mt-2 flex flex-wrap items-baseline gap-x-2 text-[11px]">
+      <span className="font-medium text-foreground">{seconds >= 0 ? "Starts in" : "Started"} {countdown}</span>
+      <span className="text-muted-foreground">· {start.toLocaleString()}</span>
+      <span className="basis-full text-[10px] text-muted-foreground">Countdown is to scheduled start; odds keep updating live and can change at any time.</span>
+    </div>
+  );
+}
+
 export default function ArbTable({ arbs = [], bankroll = 0, roundTo = 100 }) {
   if (!arbs.length) {
     return <div className="rounded-xl border border-border bg-card px-5 py-10 text-center text-sm text-muted-foreground">No arbitrage opportunities are available yet.</div>;
@@ -40,6 +67,7 @@ export default function ArbTable({ arbs = [], bankroll = 0, roundTo = 100 }) {
               <div className="min-w-0">
                 <h3 className="break-words text-sm font-semibold text-foreground">{match || "Unnamed match"}</h3>
                 <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{[arb.sport, marketText(arb.market)].filter(Boolean).join(" · ")}</p>
+                <EventCountdown startTime={arb.startTime} />
               </div>
               <div className="flex shrink-0 items-center gap-4 sm:text-right">
                 <div>

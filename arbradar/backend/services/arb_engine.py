@@ -11,12 +11,15 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from backend.utils.atomic import replace_with_retry
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 WEB_AUDIT_REPORTS = PROJECT_ROOT.parent / "Web Audit" / "reports"
 ENGINE_REPORT = PROJECT_ROOT / "reports" / "engine" / "latest.json"
 OPPORTUNITY_HISTORY_REPORT = PROJECT_ROOT / "reports" / "engine" / "opportunity-history.json"
 ARBRADAR_REPORTS = PROJECT_ROOT / "reports"
 _REPORT_LOCK = threading.Lock()
+_ODDS_FILE_CACHE: dict[str, tuple[int, list[dict]]] = {}
 
 TEAM_SYNONYMS = {
     "barca": "barcelona",
@@ -39,8 +42,25 @@ NON_EVENT_TERMS = {"odds", "onyesha", "alama zilizoboreshwa", "chini ya", "marke
 SIMULATED_EVENT_TERMS = (
     "virtual", "simulated", "simulation", "simulator", "e-soccer", "esoccer",
     "e-football", "efootball", "e-basketball", "ebasketball", "e-tennis", "etennis",
-    "virtual sports", "cyber football",
+    "virtual sports", "cyber", "esports", "e-sports", "v-football", "v football",
+    "fifae", "fifa esports", "fifa e-sports",
 )
+
+
+def fixture_compliance_checks() -> list[dict]:
+    """Report which requested data-quality protections are enforced today."""
+    return [
+        {"name": "Virtual and simulated event labels", "status": "partial", "detail": "Filters common virtual, esports, cyber, and simulation labels in event, sport, league, and competition text. FIFAe is excluded; ordinary FIFA competitions remain eligible."},
+        {"name": "Virtual URL paths and provider tags", "status": "missing", "detail": "Collector records do not consistently retain endpoint paths or provider identifiers for filtering."},
+        {"name": "Compressed fixture schedule detection", "status": "missing", "detail": "No cross-event cadence analysis is applied; start times are not consistently available."},
+        {"name": "Suspicious match ID patterns", "status": "missing", "detail": "Match IDs are not retained and profiled across feeds."},
+        {"name": "Odds and market sanity", "status": "partial", "detail": "Odds range, market identity, outcome completeness, and quote freshness are checked. Overround behavior and robotic update patterns are not analyzed."},
+        {"name": "Canonical participant identity", "status": "partial", "detail": "A small synonym map is used; there is no master participant ID registry."},
+        {"name": "Venue cross-reference", "status": "missing", "detail": "Venue data is not collected or verified."},
+        {"name": "Cross-book event matching", "status": "partial", "detail": "Normalized participant names must match exactly after limited aliases; no fuzzy confidence score or kickoff-time check is used."},
+        {"name": "Odds movement anomaly flags", "status": "missing", "detail": "Large unexplained price changes are not flagged against score or match-state changes."},
+        {"name": "Manual review queue", "status": "missing", "detail": "Ambiguous or suspicious fixtures are dropped or processed by existing rules; there is no review queue."},
+    ]
 
 
 def is_fresh(path: Path) -> bool:
@@ -61,7 +81,12 @@ def is_identified_event(event_name: object, market: object, selections: object) 
     market_name = normalize_name(str(market.get("name") or "1x2"))
     is_over_under = ("over" in market_name and "under" in market_name) or "total" in market_name
     is_handicap = "handicap" in market_name
-    is_binary = market_name in YES_NO_MARKETS or "yes no" in market_name or "both teams to score" in market_name or "odd even" in market_name
+    is_binary = (
+        market_name in YES_NO_MARKETS
+        or "yes" in market_name and "no" in market_name
+        or "both teams to score" in market_name
+        or "odd" in market_name and "even" in market_name
+    )
     expected_length = 3 if market_name == "1x2" else 2 if market_name in TWO_OUTCOME_MARKETS or is_over_under or is_handicap or is_binary else 0
     if len(selections) != expected_length:
         return False
@@ -78,6 +103,9 @@ def is_real_sports_event(event: dict) -> bool:
     searchable = " ".join((
         str(event.get("name", "")), str(event.get("sport", "")),
         str(event.get("league", "")), str(event.get("competition", "")),
+        str(event.get("category", "")), str(event.get("tournament", "")),
+        str(event.get("provider", "")), str(event.get("providerName", "")),
+        str(event.get("url", "")), str(event.get("eventUrl", "")),
     )).casefold()
     return not any(term in searchable for term in SIMULATED_EVENT_TERMS)
 
@@ -88,6 +116,28 @@ def is_live_quote(row: dict, now: datetime | None = None) -> bool:
     except (TypeError, ValueError):
         return False
     return (now or datetime.now(timezone.utc)) - observed <= MAX_ARB_ODDS_AGE
+
+
+def event_start_time(event: dict) -> str | None:
+    """Return a validated fixture start time when a feed provides one."""
+    for key in ("startTime", "start_time", "commence_time", "commenceTime", "startDate", "start_date", "kickoff", "kickoffTime", "date"):
+        value = event.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            if isinstance(value, (int, float)) or str(value).isdigit():
+                stamp = float(value)
+                if stamp > 10_000_000_000:
+                    stamp /= 1000
+                parsed = datetime.fromtimestamp(stamp, tz=timezone.utc)
+            else:
+                parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc).isoformat()
+        except (TypeError, ValueError, OverflowError, OSError):
+            continue
+    return None
 
 
 def normalize_name(name: str) -> str:
@@ -174,7 +224,7 @@ def normalize_market(name: object, sport: object = "") -> str:
     if "odd" in market and "even" in market:
         return "odd even"
     if "yes" in market and "no" in market:
-        return market
+        return "yes no"
     return market
 
 
@@ -256,11 +306,88 @@ def extract_events(data: object) -> list[dict]:
                         }
                     )
                 markets.append({"name": market.get("name") or "1x2", "selections": selections})
-            events.append({"name": f"{home} vs {away}", "sport": item.get("sport") or item.get("sport_name", ""), "markets": markets})
+            events.append({"name": f"{home} vs {away}", "sport": item.get("sport") or item.get("sport_name", ""), "markets": markets, "startTime": event_start_time(item)})
         return events
     if isinstance(data, list):
         return [event for event in data if isinstance(event, dict)]
     return []
+
+
+def _cached_json_odds_rows(json_file: Path) -> list[dict]:
+    """Parse a sportsbook snapshot once, refreshing its rows when the file changes."""
+    try:
+        stat = json_file.stat()
+        cache_key = str(json_file.resolve())
+        cached = _ODDS_FILE_CACHE.get(cache_key)
+        if cached and cached[0] == stat.st_mtime_ns:
+            return cached[1]
+
+        data = json.loads(json_file.read_text(encoding="utf-8"))
+        rows = []
+        if is_odds_json(data):
+            site = json_file.parents[1].name
+            observed_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+            for event in extract_events(data):
+                if not is_real_sports_event(event):
+                    continue
+                event_name = event.get("name", "")
+                for market in event.get("markets", []):
+                    market_name = market.get("name", "")
+                    selections = market.get("selections", [])
+                    if not is_identified_event(event_name, market, selections):
+                        continue
+                    for selection in selections:
+                        odds = selection.get("odds")
+                        if odds in (None, ""):
+                            continue
+                        rows.append({
+                            "event": event_name,
+                            "sport": event.get("sport", ""),
+                            "market": market_name or "1x2",
+                            "selection": selection.get("name", ""),
+                            "site": site,
+                            "odds": float(odds),
+                            "observedAt": observed_at,
+                            "startTime": event_start_time(event),
+                        })
+        _ODDS_FILE_CACHE[cache_key] = (stat.st_mtime_ns, rows)
+        return rows
+    except Exception:
+        return []
+
+
+def _cached_master_csv_rows(master_csv: Path) -> list[dict]:
+    try:
+        stat = master_csv.stat()
+        cache_key = str(master_csv.resolve())
+        cached = _ODDS_FILE_CACHE.get(cache_key)
+        if cached and cached[0] == stat.st_mtime_ns:
+            return cached[1]
+
+        rows = []
+        observed_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+        with master_csv.open(encoding="utf-8", newline="") as handle:
+            for row in csv.DictReader(handle):
+                try:
+                    csv_searchable = " ".join(str(row.get(field, "")) for field in ("event", "sport", "league", "competition")).casefold()
+                    if any(term in csv_searchable for term in SIMULATED_EVENT_TERMS):
+                        continue
+                    rows.append({
+                        "event": row["event"],
+                        "sport": row.get("sport", ""),
+                        "market": row.get("market") or "1x2",
+                        "selection": row["selection"],
+                        "site": row["site"],
+                        "odds": float(row["odds"]),
+                        "observedAt": observed_at,
+                        "startTime": event_start_time(row),
+                    })
+                except (KeyError, TypeError, ValueError):
+                    continue
+        _ODDS_FILE_CACHE[cache_key] = (stat.st_mtime_ns, rows)
+        return rows
+    except Exception:
+        return []
 
 
 def collect_odds_rows() -> list[dict]:
@@ -275,100 +402,19 @@ def collect_odds_rows() -> list[dict]:
             if not odds_dir.exists():
                 continue
             for json_file in odds_dir.glob("*.json"):
-                try:
-                    if not is_fresh(json_file):
-                        continue
-                    data = json.loads(json_file.read_text(encoding="utf-8"))
-                    if not is_odds_json(data):
-                        continue
-                    for event in extract_events(data):
-                        if not is_real_sports_event(event):
-                            continue
-                        event_name = event.get("name", "")
-                        for market in event.get("markets", []):
-                            market_name = market.get("name", "")
-                            selections = market.get("selections", [])
-                            if not is_identified_event(event_name, market, selections):
-                                continue
-                            for selection in selections:
-                                odds = selection.get("odds")
-                                if odds in (None, ""):
-                                    continue
-                                rows.append(
-                                    {
-                                        "event": event_name,
-                                        "sport": event.get("sport", ""),
-                                        "market": market_name or "1x2",
-                                        "selection": selection.get("name", ""),
-                                        "site": site_folder.name,
-                                        "odds": float(odds),
-                                        "observedAt": datetime.fromtimestamp(json_file.stat().st_mtime, tz=timezone.utc).isoformat(),
-                                    }
-                                )
-                except Exception:
-                    continue
+                if is_fresh(json_file):
+                    rows.extend(_cached_json_odds_rows(json_file))
 
     # 2) Web Audit master_odds.csv fallback
     master_csv = WEB_AUDIT_REPORTS / "master_odds.csv"
     if master_csv.exists() and is_fresh(master_csv):
-        with master_csv.open(encoding="utf-8", newline="") as handle:
-            for row in csv.DictReader(handle):
-                try:
-                    csv_searchable = " ".join(str(row.get(field, "")) for field in ("event", "sport", "league", "competition")).casefold()
-                    if any(term in csv_searchable for term in SIMULATED_EVENT_TERMS):
-                        continue
-                    rows.append(
-                        {
-                            "event": row["event"],
-                            "sport": row.get("sport", ""),
-                            "market": row.get("market") or "1x2",
-                            "selection": row["selection"],
-                            "site": row["site"],
-                            "odds": float(row["odds"]),
-                            "observedAt": datetime.fromtimestamp(master_csv.stat().st_mtime, tz=timezone.utc).isoformat(),
-                        }
-                    )
-                except (KeyError, TypeError, ValueError):
-                    continue
+        rows.extend(_cached_master_csv_rows(master_csv))
 
     # 3) ArbRadar per-site reports with events or oddsChanges
     if ARBRADAR_REPORTS.exists():
         for json_file in ARBRADAR_REPORTS.glob("*/odds/latest.json"):
-            try:
-                if not is_fresh(json_file):
-                    continue
-                data = json.loads(json_file.read_text(encoding="utf-8"))
-                site = json_file.parents[1].name
-
-                for event in extract_events(data):
-                    if not is_real_sports_event(event):
-                        continue
-                    event_name = event.get("name", "")
-                    for market in event.get("markets", []):
-                        market_name = market.get("name", "")
-                        selections = market.get("selections", [])
-                        if not is_identified_event(event_name, market, selections):
-                            continue
-                        for selection in selections:
-                            odds = selection.get("odds")
-                            if odds in (None, ""):
-                                continue
-                            rows.append(
-                                {
-                                    "event": event_name,
-                                    "sport": event.get("sport", ""),
-                                    "market": market_name or "1x2",
-                                    "selection": selection.get("name", ""),
-                                    "site": site,
-                                    "odds": float(odds),
-                                    "observedAt": datetime.fromtimestamp(json_file.stat().st_mtime, tz=timezone.utc).isoformat(),
-                                }
-                            )
-
-                # ``oddsChanges`` is a display feed, not a structured market.
-                # It must never be used to invent events or arbitrage paths.
-            except Exception:
-                continue
+            if is_fresh(json_file):
+                rows.extend(_cached_json_odds_rows(json_file))
 
     return rows
 
@@ -414,6 +460,7 @@ def scan_arbitrage(rows: list[dict], include_nonpositive: bool = False) -> list[
                 "event": row["event"],
                 "market": row.get("market") or "1x2",
                 "observedAt": row.get("observedAt"),
+                "startTime": row.get("startTime"),
             }
 
     opportunities = []
@@ -488,6 +535,7 @@ def scan_arbitrage(rows: list[dict], include_nonpositive: bool = False) -> list[
                 "margin": profit_margin / 100,
                 "market": market_label(market_norm),
                 "sport": sport_norm,
+                "startTime": next((pick.get("startTime") for pick in selections.values() if pick.get("startTime")), None),
                 "selections": list(selections.values()),
             }
         )
@@ -586,6 +634,7 @@ def build_engine_data() -> dict:
         "sourceCount": len(sources),
         "sources": sources,
         "diagnostics": build_diagnostics(rows, opportunities, checked_markets, rows_are_live=True),
+        "complianceChecks": fixture_compliance_checks(),
         "nearMisses": near_misses,
         "updatedAt": datetime.now(timezone.utc).isoformat(),
         "lastOddsAt": max((row.get("observedAt", "") for row in rows), default=None) or None,
@@ -643,7 +692,7 @@ def record_opportunity_history(opportunities: list[dict]) -> list[dict]:
     OPPORTUNITY_HISTORY_REPORT.parent.mkdir(parents=True, exist_ok=True)
     temporary = OPPORTUNITY_HISTORY_REPORT.with_name(f"opportunity-history.{os.getpid()}.{threading.get_ident()}.tmp")
     temporary.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(OPPORTUNITY_HISTORY_REPORT)
+    replace_with_retry(temporary, OPPORTUNITY_HISTORY_REPORT)
     return history[-500:]
 
 
@@ -659,7 +708,7 @@ def write_engine_report() -> dict:
         ENGINE_REPORT.parent.mkdir(parents=True, exist_ok=True)
         temporary = ENGINE_REPORT.with_name(f"latest.{os.getpid()}.{threading.get_ident()}.tmp")
         temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        temporary.replace(ENGINE_REPORT)
+        replace_with_retry(temporary, ENGINE_REPORT)
     print(
         f"Engine report written: {len(payload['arbs'])} arbs, "
         f"{payload['sourceCount']} sources -> {ENGINE_REPORT}"
